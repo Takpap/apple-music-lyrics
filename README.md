@@ -1,5 +1,7 @@
 # Apple Music Lyrics
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 An unofficial macOS menu bar app that displays synchronized lyrics for the
 current track in Music.app. It reads Apple Music's existing on-disk cache and
 does not contact a third-party lyrics service.
