@@ -204,8 +204,19 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
 // MARK: - Lyrics canvas
 
 private final class LyricsCanvasView: NSView {
-    private let horizontalInset: CGFloat = 24
-    private let activeFont = NSFont.systemFont(ofSize: 19, weight: .semibold)
+    private var typographyScale: CGFloat {
+        let widthScale = bounds.width / 460
+        let heightScale = bounds.height / 315
+        return min(2.2, max(0.85, min(widthScale, heightScale)))
+    }
+
+    private var horizontalInset: CGFloat {
+        min(64, max(20, bounds.width * 0.055))
+    }
+
+    private var activeFont: NSFont {
+        .systemFont(ofSize: 19 * typographyScale, weight: .semibold)
+    }
 
     private var lines: [LyricLine] = []
     private var timing: WordTimingQuality = .none
@@ -216,6 +227,7 @@ private final class LyricsCanvasView: NSView {
     private var lineCenters: [CGFloat] = []
     private var lineHeights: [CGFloat] = []
     private var geometryWidth: CGFloat = 0
+    private var geometryScale: CGFloat = 0
     private var geometryLinesID: [String] = []
 
     private var displayedOffset: CGFloat?
@@ -265,7 +277,8 @@ private final class LyricsCanvasView: NSView {
     override func layout() {
         super.layout()
         edgeMask.frame = bounds
-        if abs(geometryWidth - bounds.width) > 0.5 {
+        if abs(geometryWidth - bounds.width) > 0.5
+            || abs(geometryScale - typographyScale) > 0.01 {
             invalidateGeometry()
         }
     }
@@ -324,6 +337,7 @@ private final class LyricsCanvasView: NSView {
 
     func invalidateGeometry() {
         geometryWidth = 0
+        geometryScale = 0
         geometryLinesID = []
         activeLayout = nil
         activeLayoutKey = ""
@@ -392,9 +406,13 @@ private final class LyricsCanvasView: NSView {
 
     private func rebuildGeometryIfNeeded() {
         let ids = lines.map(\.id)
-        guard abs(geometryWidth - bounds.width) > 0.5 || geometryLinesID != ids else { return }
+        let scale = typographyScale
+        guard abs(geometryWidth - bounds.width) > 0.5
+                || abs(geometryScale - scale) > 0.01
+                || geometryLinesID != ids else { return }
 
         geometryWidth = bounds.width
+        geometryScale = scale
         geometryLinesID = ids
         let width = max(80, bounds.width - horizontalInset * 2)
         var cursor: CGFloat = 0
@@ -402,10 +420,13 @@ private final class LyricsCanvasView: NSView {
         lineHeights = []
 
         for line in lines {
-            let height = max(34, measuredHeight(text: line.text, font: activeFont, width: width) + 12)
+            let height = max(
+                34 * scale,
+                measuredHeight(text: line.text, font: activeFont, width: width) + 12 * scale
+            )
             lineHeights.append(height)
             lineCenters.append(cursor + height / 2)
-            cursor += height + 5
+            cursor += height + 5 * scale
         }
         activeLayout = nil
         activeLayoutKey = ""
@@ -418,7 +439,7 @@ private final class LyricsCanvasView: NSView {
         position: TimeInterval,
         prominence: CGFloat
     ) {
-        let key = "\(line.id)|\(Int(width.rounded()))"
+        let key = "\(line.id)|\(Int(width.rounded()))|\(Int((activeFont.pointSize * 10).rounded()))"
         if activeLayoutKey != key {
             activeLayout = KaraokeLineLayout(line: line, font: activeFont, width: width)
             activeLayoutKey = key
@@ -448,7 +469,7 @@ private final class LyricsCanvasView: NSView {
     ) {
         let distance = abs(CGFloat(index) - visualFocus)
         let proximity = max(0, 1 - min(1, distance - 0.15))
-        let fontSize = 14.5 + proximity * 1.5
+        let fontSize = (14.5 + proximity * 1.5) * typographyScale
         let alpha = max(0.18, 0.66 - distance * 0.14)
         let font = NSFont.systemFont(ofSize: fontSize, weight: proximity > 0.55 ? .medium : .regular)
         let paragraph = NSMutableParagraphStyle()
@@ -478,19 +499,23 @@ private final class LyricsCanvasView: NSView {
         let attributed = NSAttributedString(
             string: text,
             attributes: [
-                .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+                .font: NSFont.systemFont(
+                    ofSize: min(22, 14 * typographyScale),
+                    weight: .medium
+                ),
                 .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.72),
                 .paragraphStyle: paragraph
             ]
         )
-        let width = max(80, bounds.width - 48)
+        let inset = horizontalInset
+        let width = max(80, bounds.width - inset * 2)
         let height = attributed.boundingRect(
             with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).height
         attributed.draw(
             with: NSRect(
-                x: 24,
+                x: inset,
                 y: (bounds.height - height) / 2,
                 width: width,
                 height: height
@@ -506,13 +531,19 @@ private final class LyricsCanvasView: NSView {
         let attributed = NSAttributedString(
             string: text,
             attributes: [
-                .font: NSFont.systemFont(ofSize: 14, weight: .regular),
+                .font: NSFont.systemFont(
+                    ofSize: min(24, 14 * typographyScale),
+                    weight: .regular
+                ),
                 .foregroundColor: NSColor.labelColor.withAlphaComponent(0.72),
                 .paragraphStyle: paragraph
             ]
         )
         attributed.draw(
-            with: bounds.insetBy(dx: 24, dy: 20),
+            with: bounds.insetBy(
+                dx: horizontalInset,
+                dy: 20 * min(1.6, typographyScale)
+            ),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
     }
