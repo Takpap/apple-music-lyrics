@@ -195,23 +195,49 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
         saveFrame()
     }
 
+    func windowWillStartLiveResize(_ notification: Notification) {
+        canvas.beginLiveResize()
+    }
+
     func windowDidResize(_ notification: Notification) {
+        guard !panel.inLiveResize else { return }
         saveFrame()
         canvas.invalidateGeometry()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        canvas.endLiveResize()
+        saveFrame()
     }
 }
 
 // MARK: - Lyrics canvas
 
 private final class LyricsCanvasView: NSView {
+    private var layoutSize: NSSize {
+        guard isLiveResizing else { return bounds.size }
+        return NSSize(
+            width: max(1, (bounds.width / 12).rounded() * 12),
+            height: max(1, (bounds.height / 10).rounded() * 10)
+        )
+    }
+
     private var typographyScale: CGFloat {
-        let widthScale = bounds.width / 460
-        let heightScale = bounds.height / 315
+        let widthScale = layoutSize.width / 460
+        let heightScale = layoutSize.height / 315
         return min(2.2, max(0.85, min(widthScale, heightScale)))
     }
 
     private var horizontalInset: CGFloat {
-        min(64, max(20, bounds.width * 0.055))
+        min(64, max(20, layoutSize.width * 0.055))
+    }
+
+    private var contentOriginX: CGFloat {
+        (bounds.width - layoutSize.width) / 2 + horizontalInset
+    }
+
+    private var contentWidth: CGFloat {
+        max(80, layoutSize.width - horizontalInset * 2)
     }
 
     private var activeFont: NSFont {
@@ -234,6 +260,7 @@ private final class LyricsCanvasView: NSView {
     private var displayedFocus: CGFloat?
     private var lastFrameTime = CACurrentMediaTime()
     private var displayTimer: Timer?
+    private var isLiveResizing = false
 
     private var basePosition: TimeInterval = 0
     private var sampledAt = CACurrentMediaTime()
@@ -276,8 +303,11 @@ private final class LyricsCanvasView: NSView {
 
     override func layout() {
         super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         edgeMask.frame = bounds
-        if abs(geometryWidth - bounds.width) > 0.5
+        CATransaction.commit()
+        if abs(geometryWidth - layoutSize.width) > 0.5
             || abs(geometryScale - typographyScale) > 0.01 {
             invalidateGeometry()
         }
@@ -344,6 +374,22 @@ private final class LyricsCanvasView: NSView {
         needsDisplay = true
     }
 
+    func beginLiveResize() {
+        guard !isLiveResizing else { return }
+        isLiveResizing = true
+        stopTimer()
+        invalidateGeometry()
+    }
+
+    func endLiveResize() {
+        guard isLiveResizing else { return }
+        isLiveResizing = false
+        invalidateGeometry()
+        if !lines.isEmpty {
+            activateTimer()
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
@@ -377,7 +423,7 @@ private final class LyricsCanvasView: NSView {
         let offset = displayedOffset ?? targetOffset
         let visualFocus = displayedFocus ?? targetFocus
         let position = interpolatedPosition(at: now)
-        let contentWidth = max(80, bounds.width - horizontalInset * 2)
+        let width = contentWidth
 
         for index in lines.indices {
             let centerY = lineCenters[index] - offset
@@ -388,7 +434,7 @@ private final class LyricsCanvasView: NSView {
                 drawActiveLine(
                     lines[index],
                     centerY: centerY,
-                    width: contentWidth,
+                    width: width,
                     position: position,
                     prominence: max(0.55, 1 - abs(CGFloat(index) - visualFocus) * 0.45)
                 )
@@ -397,7 +443,7 @@ private final class LyricsCanvasView: NSView {
                     lines[index],
                     index: index,
                     centerY: centerY,
-                    width: contentWidth,
+                    width: width,
                     visualFocus: visualFocus
                 )
             }
@@ -407,14 +453,14 @@ private final class LyricsCanvasView: NSView {
     private func rebuildGeometryIfNeeded() {
         let ids = lines.map(\.id)
         let scale = typographyScale
-        guard abs(geometryWidth - bounds.width) > 0.5
+        guard abs(geometryWidth - layoutSize.width) > 0.5
                 || abs(geometryScale - scale) > 0.01
                 || geometryLinesID != ids else { return }
 
-        geometryWidth = bounds.width
+        geometryWidth = layoutSize.width
         geometryScale = scale
         geometryLinesID = ids
-        let width = max(80, bounds.width - horizontalInset * 2)
+        let width = contentWidth
         var cursor: CGFloat = 0
         lineCenters = []
         lineHeights = []
@@ -447,7 +493,7 @@ private final class LyricsCanvasView: NSView {
         guard let layout = activeLayout else { return }
 
         let origin = NSPoint(
-            x: horizontalInset,
+            x: contentOriginX,
             y: centerY - layout.height / 2
         )
         NSGraphicsContext.saveGraphicsState()
@@ -488,7 +534,7 @@ private final class LyricsCanvasView: NSView {
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).height
         attributed.draw(
-            with: NSRect(x: horizontalInset, y: centerY - height / 2, width: width, height: height),
+            with: NSRect(x: contentOriginX, y: centerY - height / 2, width: width, height: height),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
     }
@@ -507,15 +553,14 @@ private final class LyricsCanvasView: NSView {
                 .paragraphStyle: paragraph
             ]
         )
-        let inset = horizontalInset
-        let width = max(80, bounds.width - inset * 2)
+        let width = contentWidth
         let height = attributed.boundingRect(
             with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).height
         attributed.draw(
             with: NSRect(
-                x: inset,
+                x: contentOriginX,
                 y: (bounds.height - height) / 2,
                 width: width,
                 height: height
@@ -540,9 +585,11 @@ private final class LyricsCanvasView: NSView {
             ]
         )
         attributed.draw(
-            with: bounds.insetBy(
-                dx: horizontalInset,
-                dy: 20 * min(1.6, typographyScale)
+            with: NSRect(
+                x: contentOriginX,
+                y: 20 * min(1.6, typographyScale),
+                width: contentWidth,
+                height: max(0, bounds.height - 40 * min(1.6, typographyScale))
             ),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
@@ -590,7 +637,7 @@ private final class LyricsCanvasView: NSView {
     }
 
     private func activateTimer() {
-        guard displayTimer == nil else { return }
+        guard displayTimer == nil, !isLiveResizing else { return }
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.needsDisplay = true
         }

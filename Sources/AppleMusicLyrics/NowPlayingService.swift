@@ -1,25 +1,19 @@
-import Foundation
+import AppKit
 
 /// Polls Music.app for the currently playing track via AppleScript.
 final class NowPlayingService: @unchecked Sendable {
     private let delimiter = "\u{1F}"
+    private let musicBundleIdentifier = "com.apple.Music"
+
+    var isMusicRunning: Bool {
+        !NSRunningApplication.runningApplications(
+            withBundleIdentifier: musicBundleIdentifier
+        ).isEmpty
+    }
 
     func fetch() -> Result<TrackInfo?, Error> {
         // Avoid launching Music if it isn't already running.
-        let runningScript = """
-        tell application "System Events"
-            return (name of processes) contains "Music"
-        end tell
-        """
-
-        switch AppleScriptRunner.run(runningScript) {
-        case .failure(let error):
-            return .failure(error)
-        case .success(let running):
-            if running.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "true" {
-                return .success(nil)
-            }
-        }
+        guard isMusicRunning else { return .success(nil) }
 
         let script = """
         tell application "Music"

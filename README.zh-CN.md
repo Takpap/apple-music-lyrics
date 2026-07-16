@@ -127,9 +127,27 @@ Gatekeeper 警告。
 系统设置 > 隐私与安全性 > 自动化
 ```
 
-当前实现还会询问 **System Events** 来判断 Music.app 是否正在运行。根据 macOS
-版本不同，System Events 可能显示为单独的自动化权限。应用不需要“完全磁盘访问”
-权限，也不会读取 Apple 账户凭据。
+应用通过 macOS 的进程 API 判断 Music.app 是否正在运行，不需要控制
+**System Events**。应用也不需要“完全磁盘访问”权限，不会读取 Apple 账户凭据。
+
+### 播放歌曲时显示 Error
+
+首次读取当前歌曲时，macOS 会询问是否允许 Apple Music Lyrics 控制 Music，
+请选择“允许”。如果没有出现授权提示，或播放歌曲后仍显示 Error，请检查：
+
+```text
+系统设置 > 隐私与安全性 > 自动化 > Apple Music Lyrics > Music
+```
+
+如果“自动化”列表中没有 Apple Music Lyrics，请退出应用，在终端执行以下命令，
+然后在重新出现的系统授权窗口中选择“允许”：
+
+```bash
+tccutil reset AppleEvents local.applemusiclyrics
+open "/Applications/Apple Music Lyrics.app"
+```
+
+使用 ad-hoc 签名的应用在重新安装或升级后，可能需要重新授权。
 
 ## 菜单操作
 

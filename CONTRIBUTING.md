@@ -31,6 +31,9 @@ APPLE_MUSIC_CACHE_INTEGRATION=1 \
 - Add or update tests for TTML parsing, cache matching, and timing behavior.
 - Preserve read-only access to Music.app's cache.
 - Do not add account-token extraction, request interception, or hidden network calls.
+- Preserve the `com.apple.security.automation.apple-events` entitlement when
+  packaging with Hardened Runtime; without it, Music automation is denied
+  before macOS can show the permission prompt.
 - Do not commit `.build`, `dist`, app bundles, local cache data, or copyrighted lyrics.
 - Document behavior that depends on a private Apple format.
 

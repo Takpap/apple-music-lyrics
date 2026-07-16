@@ -10,6 +10,7 @@ APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
+ENTITLEMENTS="$ROOT/AppleMusicLyrics.entitlements"
 VERSION="${VERSION:-1.0.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 UNIVERSAL="${UNIVERSAL:-0}"
@@ -82,7 +83,13 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
 
 echo "→ Signing app with identity: $CODESIGN_IDENTITY"
-/usr/bin/codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP"
+/usr/bin/codesign \
+  --force \
+  --deep \
+  --options runtime \
+  --entitlements "$ENTITLEMENTS" \
+  --sign "$CODESIGN_IDENTITY" \
+  "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
 
 echo "→ Done: $APP"

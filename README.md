@@ -133,10 +133,30 @@ On first launch, allow Apple Music Lyrics to control **Music** under:
 System Settings > Privacy & Security > Automation
 ```
 
-The current implementation also asks **System Events** whether Music.app is
-running. Depending on the macOS version, System Events may appear as a separate
-Automation permission. The app does not require Full Disk Access and does not
-read Apple account credentials.
+The app uses the macOS process API to determine whether Music.app is running,
+so it does not need permission to control **System Events**. It also does not
+require Full Disk Access or read Apple account credentials.
+
+### Error While Music Is Playing
+
+The first time the app reads the current track, macOS asks whether Apple Music
+Lyrics may control Music. Choose **Allow**. If the prompt does not appear, or
+the app still shows Error while a song is playing, check:
+
+```text
+System Settings > Privacy & Security > Automation > Apple Music Lyrics > Music
+```
+
+If Apple Music Lyrics is missing from the Automation list, quit the app, run
+the following commands in Terminal, and choose **Allow** when macOS asks again:
+
+```bash
+tccutil reset AppleEvents local.applemusiclyrics
+open "/Applications/Apple Music Lyrics.app"
+```
+
+An ad-hoc signed build may require renewed permission after it is reinstalled
+or upgraded.
 
 ## Menu Actions
 

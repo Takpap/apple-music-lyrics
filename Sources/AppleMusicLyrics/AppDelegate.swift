@@ -76,13 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .success(nil):
             currentTrackKey = nil
             currentLyrics = .empty
-            let runningScript = """
-            tell application "System Events"
-                return (name of processes) contains "Music"
-            end tell
-            """
-            if case .success(let running) = AppleScriptRunner.run(runningScript),
-               running.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true" {
+            if nowPlaying.isMusicRunning {
                 apply(.stopped)
             } else {
                 apply(.musicNotRunning)
