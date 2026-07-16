@@ -192,10 +192,12 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
+        guard !panel.inLiveResize else { return }
         saveFrame()
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
+        panel.hasShadow = false
         canvas.beginLiveResize()
     }
 
@@ -207,6 +209,8 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         canvas.endLiveResize()
+        panel.hasShadow = true
+        panel.invalidateShadow()
         saveFrame()
     }
 }
@@ -261,6 +265,7 @@ private final class LyricsCanvasView: NSView {
     private var lastFrameTime = CACurrentMediaTime()
     private var displayTimer: Timer?
     private var isLiveResizing = false
+    private var liveResizeSnapshot: NSImage?
 
     private var basePosition: TimeInterval = 0
     private var sampledAt = CACurrentMediaTime()
@@ -376,14 +381,16 @@ private final class LyricsCanvasView: NSView {
 
     func beginLiveResize() {
         guard !isLiveResizing else { return }
+        liveResizeSnapshot = makeSnapshot()
         isLiveResizing = true
         stopTimer()
-        invalidateGeometry()
+        needsDisplay = true
     }
 
     func endLiveResize() {
         guard isLiveResizing else { return }
         isLiveResizing = false
+        liveResizeSnapshot = nil
         invalidateGeometry()
         if !lines.isEmpty {
             activateTimer()
@@ -392,6 +399,19 @@ private final class LyricsCanvasView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+
+        if isLiveResizing, let snapshot = liveResizeSnapshot {
+            NSGraphicsContext.current?.imageInterpolation = .low
+            snapshot.draw(
+                in: bounds,
+                from: NSRect(origin: .zero, size: snapshot.size),
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: true,
+                hints: [.interpolation: NSImageInterpolation.low.rawValue]
+            )
+            return
+        }
 
         if let message {
             drawMessage(message)
@@ -606,6 +626,18 @@ private final class LyricsCanvasView: NSView {
             with: NSSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).height
+    }
+
+    private func makeSnapshot() -> NSImage? {
+        guard bounds.width > 0,
+              bounds.height > 0,
+              let representation = bitmapImageRepForCachingDisplay(in: bounds) else {
+            return nil
+        }
+        cacheDisplay(in: bounds, to: representation)
+        let image = NSImage(size: bounds.size)
+        image.addRepresentation(representation)
+        return image
     }
 
     private func updateClock(_ track: TrackInfo) {
