@@ -205,6 +205,8 @@ Sources/AppleMusicLyrics/
   AppleScriptRunner.swift               AppleScript execution helper
 
 Tests/AppleMusicLyricsTests/             Unit and opt-in integration tests
+Resources/AppIcon.png                    App icon source image
+Resources/AppIcon.icns                   macOS application bundle icon
 scripts/run.sh                           Release build and direct launch
 scripts/package-app.sh                   Local app bundle packaging
 scripts/create-release-artifacts.sh      Universal ZIP and DMG creation

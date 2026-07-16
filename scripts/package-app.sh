@@ -11,6 +11,7 @@ CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 ENTITLEMENTS="$ROOT/AppleMusicLyrics.entitlements"
+APP_ICON="$ROOT/Resources/AppIcon.icns"
 VERSION="${VERSION:-1.0.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 UNIVERSAL="${UNIVERSAL:-0}"
@@ -22,6 +23,10 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "BUILD_NUMBER must be a positive integer" >&2
+  exit 1
+fi
+if [[ ! -f "$APP_ICON" ]]; then
+  echo "App icon not found: $APP_ICON" >&2
   exit 1
 fi
 
@@ -44,6 +49,7 @@ echo "→ Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES"
 cp "$BIN" "$MACOS/AppleMusicLyrics"
+cp "$APP_ICON" "$RESOURCES/AppIcon.icns"
 chmod +x "$MACOS/AppleMusicLyrics"
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
@@ -57,6 +63,8 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <string>AppleMusicLyrics</string>
   <key>CFBundleIdentifier</key>
   <string>local.applemusiclyrics</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

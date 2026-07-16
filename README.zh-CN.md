@@ -195,6 +195,8 @@ Sources/AppleMusicLyrics/
   AppleScriptRunner.swift               AppleScript 执行工具
 
 Tests/AppleMusicLyricsTests/             单元测试和可选集成测试
+Resources/AppIcon.png                    应用图标源文件
+Resources/AppIcon.icns                   macOS 应用包图标
 scripts/run.sh                           Release 构建和直接运行
 scripts/package-app.sh                   本地应用包打包
 scripts/create-release-artifacts.sh      Universal ZIP 和 DMG 生成
