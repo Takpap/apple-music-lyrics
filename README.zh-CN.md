@@ -79,6 +79,26 @@ open "dist/Apple Music Lyrics.app"
 ditto "dist/Apple Music Lyrics.app" "/Applications/Apple Music Lyrics.app"
 ```
 
+### 无法打开下载的应用
+
+发布版本使用 ad-hoc 签名且尚未经过 Apple 公证，因此从浏览器下载后，macOS
+可能提示应用“无法验证”或“已损坏”。请先确认应用来自本项目的官方 GitHub
+Release，然后在终端中移除下载隔离属性并重新打开：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Apple Music Lyrics.app"
+open "/Applications/Apple Music Lyrics.app"
+```
+
+如果仍然无法打开，可以清除应用包的全部扩展属性：
+
+```bash
+xattr -cr "/Applications/Apple Music Lyrics.app"
+```
+
+也可以在 Finder 中右键应用并选择“打开”，或前往“系统设置 > 隐私与安全性”
+选择“仍要打开”。不要对来源不明的应用执行上述命令。
+
 ## 自动发布
 
 推送符合语义化版本格式的 Tag 后，GitHub Actions 会自动执行发布工作流：

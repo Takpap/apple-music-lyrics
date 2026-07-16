@@ -82,6 +82,28 @@ Install the generated bundle for the current machine:
 ditto "dist/Apple Music Lyrics.app" "/Applications/Apple Music Lyrics.app"
 ```
 
+### If The Downloaded App Will Not Open
+
+Release builds use ad-hoc signing and are not yet notarized by Apple. After a
+browser download, macOS may report that the app cannot be verified or is
+damaged. First confirm that the app came from this project's official GitHub
+Release, then remove its quarantine attribute and open it again:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Apple Music Lyrics.app"
+open "/Applications/Apple Music Lyrics.app"
+```
+
+If it still will not open, clear all extended attributes from the app bundle:
+
+```bash
+xattr -cr "/Applications/Apple Music Lyrics.app"
+```
+
+Alternatively, Control-click the app in Finder and choose **Open**, or use
+**Open Anyway** under **System Settings > Privacy & Security**. Do not run
+these commands on an app obtained from an untrusted source.
+
 ## Releases
 
 Pushing a semantic-version tag automatically runs the GitHub Actions release
