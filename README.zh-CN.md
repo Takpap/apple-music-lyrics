@@ -5,6 +5,10 @@
 一款非官方的 macOS 菜单栏应用，用于显示 Music.app 当前歌曲的同步歌词。
 应用只读取 Apple Music 已有的本地缓存，不会请求第三方歌词服务。
 
+## 演示
+
+[观看录屏演示](static/show.mp4)
+
 > [!IMPORTANT]
 > 本项目依赖 Music.app 的私有缓存格式，macOS 更新后可能失效。如果不替换
 > 数据来源，它不适合直接提交到 Mac App Store。
@@ -83,7 +87,20 @@ ditto "dist/Apple Music Lyrics.app" "/Applications/Apple Music Lyrics.app"
 
 发布版本使用 ad-hoc 签名且尚未经过 Apple 公证，因此从浏览器下载后，macOS
 可能提示应用“无法验证”或“已损坏”。请先确认应用来自本项目的官方 GitHub
-Release，然后在终端中移除下载隔离属性并重新打开：
+Release，然后按以下步骤操作：
+
+1. 尝试打开一次 `Apple Music Lyrics.app`，并关闭系统弹出的警告。
+2. 打开“**系统设置 > 隐私与安全性**”。
+3. 向下滚动到“安全性”，找到 `Apple Music Lyrics.app` 已被阻止的提示。
+4. 点击“**仍要打开**”，然后在确认窗口中选择“打开”。macOS 可能要求使用
+   Touch ID 或输入管理员密码。
+
+![在隐私与安全性中允许打开 Apple Music Lyrics](static/gatekeeper-open-anyway.png)
+
+完成后应用应能正常启动。重新下载或更新应用后，可能需要再次执行上述操作。
+
+如果没有出现“仍要打开”，或应用仍然无法启动，可以在终端中移除下载隔离属性
+并重新打开：
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Apple Music Lyrics.app"
@@ -96,8 +113,8 @@ open "/Applications/Apple Music Lyrics.app"
 xattr -cr "/Applications/Apple Music Lyrics.app"
 ```
 
-也可以在 Finder 中右键应用并选择“打开”，或前往“系统设置 > 隐私与安全性”
-选择“仍要打开”。不要对来源不明的应用执行上述命令。
+也可以在 Finder 中右键应用并选择“打开”。不要对来源不明的应用执行上述终端
+命令。
 
 ## 自动发布
 

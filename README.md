@@ -6,6 +6,10 @@ An unofficial macOS menu bar app that displays synchronized lyrics for the
 current track in Music.app. It reads Apple Music's existing on-disk cache and
 does not contact a third-party lyrics service.
 
+## Demo
+
+[Watch the screen recording](static/show.mp4)
+
 > [!IMPORTANT]
 > This project relies on a private Music.app cache format. It can stop working
 > after a macOS update and is not suitable for App Store distribution without
@@ -87,7 +91,22 @@ ditto "dist/Apple Music Lyrics.app" "/Applications/Apple Music Lyrics.app"
 Release builds use ad-hoc signing and are not yet notarized by Apple. After a
 browser download, macOS may report that the app cannot be verified or is
 damaged. First confirm that the app came from this project's official GitHub
-Release, then remove its quarantine attribute and open it again:
+Release, then follow these steps:
+
+1. Try to open `Apple Music Lyrics.app` once and dismiss the warning.
+2. Open **System Settings > Privacy & Security**.
+3. Scroll down to **Security** and find the message saying that
+   `Apple Music Lyrics.app` was blocked.
+4. Click **Open Anyway**, then confirm **Open** when prompted. macOS may ask for
+   Touch ID or the administrator password.
+
+![Open Apple Music Lyrics from Privacy & Security](static/gatekeeper-open-anyway.png)
+
+The app should open normally afterward. A newly downloaded or updated build may
+require the same confirmation again.
+
+If **Open Anyway** does not appear or the app still will not open, remove its
+quarantine attribute in Terminal and try again:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Apple Music Lyrics.app"
@@ -100,9 +119,8 @@ If it still will not open, clear all extended attributes from the app bundle:
 xattr -cr "/Applications/Apple Music Lyrics.app"
 ```
 
-Alternatively, Control-click the app in Finder and choose **Open**, or use
-**Open Anyway** under **System Settings > Privacy & Security**. Do not run
-these commands on an app obtained from an untrusted source.
+You can also Control-click the app in Finder and choose **Open**. Do not run the
+Terminal commands above on an app obtained from an untrusted source.
 
 ## Releases
 
