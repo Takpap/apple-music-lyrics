@@ -8,7 +8,7 @@ does not contact a third-party lyrics service.
 
 ## Demo
 
-[Watch the screen recording](static/show.mp4)
+https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 
 > [!IMPORTANT]
 > This project relies on a private Music.app cache format. It can stop working

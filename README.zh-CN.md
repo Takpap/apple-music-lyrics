@@ -7,7 +7,7 @@
 
 ## 演示
 
-[观看录屏演示](static/show.mp4)
+https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 
 > [!IMPORTANT]
 > 本项目依赖 Music.app 的私有缓存格式，macOS 更新后可能失效。如果不替换
