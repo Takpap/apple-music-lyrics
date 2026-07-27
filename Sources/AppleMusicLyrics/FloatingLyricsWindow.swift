@@ -1,4 +1,5 @@
 import AppKit
+import CoreVideo
 import QuartzCore
 
 /// Floating Apple Music-style lyrics panel with a custom, continuously animated canvas.
@@ -234,7 +235,10 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard !panel.inLiveResize else { return }
+        if panel.inLiveResize {
+            canvas.updateLiveResize()
+            return
+        }
         scheduleFrameSave()
         canvas.invalidateGeometry()
     }
@@ -250,6 +254,16 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
 // MARK: - Lyrics canvas
 
 private final class LyricsCanvasView: NSView {
+    private enum AnimationSpec {
+        static let lineStateDuration: CFTimeInterval = 0.33
+        static let lineSpringMass: CGFloat = 1
+        static let lineSpringStiffness: CGFloat = 140
+        static let lineSpringDamping: CGFloat = 24
+        static let lineScrollHeadstart: TimeInterval = 0.5
+        static let featherWidth: CGFloat = 10
+        static let animationHeadstart: TimeInterval = 0
+    }
+
     private var layoutSize: NSSize {
         guard isLiveResizing else { return bounds.size }
         return NSSize(
@@ -291,11 +305,12 @@ private final class LyricsCanvasView: NSView {
     private var geometryScale: CGFloat = 0
     private var geometryLinesID: [String] = []
 
-    private var displayedOffset: CGFloat?
-    private var displayedFocus: CGFloat?
-    private var lastFrameTime = CACurrentMediaTime()
-    private var displayTimer: Timer?
+    private lazy var displayLink = DisplayLinkDriver { [weak self] in
+        self?.updateLayerPresentation()
+    }
     private var isLiveResizing = false
+    private var liveResizeBaseSize: NSSize = .zero
+    private var liveResizeBaseTypographyScale: CGFloat = 1
     private var isWindowMoving = false
     private var isWindowVisible = false
 
@@ -303,10 +318,16 @@ private final class LyricsCanvasView: NSView {
     private var sampledAt = CACurrentMediaTime()
     private var isPlaying = false
 
-    private var activeLayout: KaraokeLineLayout?
-    private var activeLayoutKey = ""
-
     private let edgeMask = CAGradientLayer()
+    private let lyricsLayer = NoImplicitAnimationLayer()
+    private var karaokeLayers: [KaraokeLineLayer] = []
+    private var visualActiveIndex: Int?
+    private var visualScrollIndex: Int?
+    private var scrollPosition: CGFloat = 0
+    private var scrollTarget: CGFloat = 0
+    private var scrollVelocity: CGFloat = 0
+    private var scrollSampleTime: CFTimeInterval = 0
+    private var isScrollStateInitialized = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -319,13 +340,15 @@ private final class LyricsCanvasView: NSView {
     }
 
     deinit {
-        displayTimer?.invalidate()
+        displayLink.stop()
     }
 
     override var isFlipped: Bool { true }
 
     private func setup() {
         wantsLayer = true
+        lyricsLayer.isGeometryFlipped = true
+        layer?.addSublayer(lyricsLayer)
         edgeMask.colors = [
             NSColor.clear.cgColor,
             NSColor.black.cgColor,
@@ -343,10 +366,22 @@ private final class LyricsCanvasView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         edgeMask.frame = bounds
+        if isLiveResizing {
+            applyLiveResizeTransform()
+        } else {
+            resetLyricsLayerGeometry()
+        }
         CATransaction.commit()
-        if abs(geometryWidth - layoutSize.width) > 0.5
-            || abs(geometryScale - typographyScale) > 0.01 {
-            invalidateGeometry()
+        if !isLiveResizing
+            && (
+                abs(geometryWidth - layoutSize.width) > 0.5
+                    || abs(geometryScale - typographyScale) > 0.01
+            ) {
+            // AppKit forbids recursively rebuilding TextKit content from layout().
+            // The next playback update or resize delegate callback performs it.
+            geometryWidth = 0
+            geometryScale = 0
+            geometryLinesID = []
         }
     }
 
@@ -359,9 +394,9 @@ private final class LyricsCanvasView: NSView {
         activeIndex = document.lineIndex(at: track.position)
         if changed {
             invalidateGeometry()
-            displayedOffset = nil
-            displayedFocus = activeIndex.map(CGFloat.init)
         }
+        rebuildLayersIfNeeded()
+        updateLayerPresentation(animateLineChange: false)
         updateTimerState()
         needsDisplay = true
     }
@@ -372,9 +407,9 @@ private final class LyricsCanvasView: NSView {
             return
         }
         updateClock(track)
-        activeIndex = lyrics.lineIndex(at: track.position)
+        rebuildLayersIfNeeded()
+        updateLayerPresentation()
         updateTimerState()
-        needsDisplay = true
     }
 
     func clear() {
@@ -382,6 +417,7 @@ private final class LyricsCanvasView: NSView {
         message = nil
         plainText = nil
         stopTimer()
+        clearKaraokeLayers()
         needsDisplay = true
     }
 
@@ -390,6 +426,7 @@ private final class LyricsCanvasView: NSView {
         plainText = nil
         message = text
         stopTimer()
+        clearKaraokeLayers()
         needsDisplay = true
     }
 
@@ -398,6 +435,7 @@ private final class LyricsCanvasView: NSView {
         message = nil
         plainText = text
         stopTimer()
+        clearKaraokeLayers()
         needsDisplay = true
     }
 
@@ -405,24 +443,60 @@ private final class LyricsCanvasView: NSView {
         geometryWidth = 0
         geometryScale = 0
         geometryLinesID = []
-        activeLayout = nil
-        activeLayoutKey = ""
+        if !isLiveResizing {
+            rebuildLayersIfNeeded()
+            updateLayerPresentation(animateLineChange: false)
+        }
         needsDisplay = true
     }
 
     func beginLiveResize() {
         guard !isLiveResizing else { return }
+        liveResizeBaseSize = bounds.size
+        liveResizeBaseTypographyScale = typographyScale
         isLiveResizing = true
-        stopTimer()
-        invalidateGeometry()
-        needsDisplay = true
+        updateLiveResize()
+        updateTimerState()
+    }
+
+    func updateLiveResize() {
+        guard isLiveResizing else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        edgeMask.frame = bounds
+        applyLiveResizeTransform()
+        CATransaction.commit()
     }
 
     func endLiveResize() {
         guard isLiveResizing else { return }
         isLiveResizing = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        resetLyricsLayerGeometry()
+        CATransaction.commit()
+        liveResizeBaseSize = .zero
         invalidateGeometry()
         updateTimerState()
+    }
+
+    private func applyLiveResizeTransform() {
+        guard liveResizeBaseSize.width > 0,
+              liveResizeBaseSize.height > 0 else { return }
+        let widthScale = bounds.width / 460
+        let heightScale = bounds.height / 315
+        let targetTypographyScale = min(2.2, max(0.85, min(widthScale, heightScale)))
+        let scale = targetTypographyScale / max(0.01, liveResizeBaseTypographyScale)
+        lyricsLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        lyricsLayer.transform = CATransform3DMakeScale(scale, scale, 1)
+    }
+
+    private func resetLyricsLayerGeometry() {
+        lyricsLayer.transform = CATransform3DIdentity
+        var layerBounds = lyricsLayer.bounds
+        layerBounds.size = bounds.size
+        lyricsLayer.bounds = layerBounds
+        lyricsLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
     }
 
     func beginWindowMove() {
@@ -458,63 +532,10 @@ private final class LyricsCanvasView: NSView {
             drawPlainText(plainText)
             return
         }
-        guard !lines.isEmpty else { return }
-
-        rebuildGeometryIfNeeded()
-        let now = CACurrentMediaTime()
-        let position = interpolatedPosition(at: now)
-        if let interpolatedIndex = lineIndex(at: position) {
-            activeIndex = interpolatedIndex
-        } else if let firstLine = lines.first, position < firstLine.time {
-            // During an intro, preview the first lyric in its unsung color
-            // instead of leaving the floating window empty.
-            activeIndex = 0
-        }
-        guard let activeIndex, activeIndex < lineCenters.count else { return }
-
-        let delta = min(0.05, max(1.0 / 240.0, now - lastFrameTime))
-        lastFrameTime = now
-        let targetFocus = CGFloat(activeIndex)
-        let targetOffset = lineCenters[activeIndex] - bounds.height * 0.44
-
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            displayedFocus = targetFocus
-            displayedOffset = targetOffset
-        } else {
-            displayedFocus = damp(displayedFocus, toward: targetFocus, delta: delta, response: 0.12)
-            displayedOffset = damp(displayedOffset, toward: targetOffset, delta: delta, response: 0.14)
-        }
-
-        let offset = displayedOffset ?? targetOffset
-        let visualFocus = displayedFocus ?? targetFocus
-        let width = contentWidth
-
-        for index in lines.indices {
-            let centerY = lineCenters[index] - offset
-            let height = lineHeights[index]
-            if centerY + height < -20 || centerY - height > bounds.height + 20 { continue }
-
-            if index == activeIndex {
-                drawActiveLine(
-                    lines[index],
-                    centerY: centerY,
-                    width: width,
-                    position: position,
-                    prominence: max(0.55, 1 - abs(CGFloat(index) - visualFocus) * 0.45)
-                )
-            } else {
-                drawNeighbor(
-                    lines[index],
-                    index: index,
-                    centerY: centerY,
-                    width: width,
-                    visualFocus: visualFocus
-                )
-            }
-        }
+        // Synced lyrics are persistent sublayers and never redraw through AppKit.
     }
 
-    private func rebuildGeometryIfNeeded() {
+    private func rebuildLayersIfNeeded() {
         let ids = lines.map(\.id)
         let scale = typographyScale
         guard abs(geometryWidth - layoutSize.width) > 0.5
@@ -528,79 +549,40 @@ private final class LyricsCanvasView: NSView {
         var cursor: CGFloat = 0
         lineCenters = []
         lineHeights = []
+        clearKaraokeLayers()
 
-        for line in lines {
-            let height = max(
-                34 * scale,
-                measuredHeight(text: line.text, font: activeFont, width: width) + 12 * scale
+        for (index, line) in lines.enumerated() {
+            let fallbackEnd = index + 1 < lines.count
+                ? max(line.time + 0.01, lines[index + 1].time)
+                : max(line.time + 2, line.endTime)
+            let lineLayer = KaraokeLineLayer(
+                line: line,
+                fallbackEnd: fallbackEnd,
+                font: activeFont,
+                width: width,
+                contentsScale: window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2,
+                featherWidth: AnimationSpec.featherWidth * scale
             )
+            let height = max(34 * scale, lineLayer.textHeight + 12 * scale)
             lineHeights.append(height)
             lineCenters.append(cursor + height / 2)
+            lineLayer.bounds = CGRect(x: 0, y: 0, width: width, height: lineLayer.textHeight)
+            lineLayer.position = CGPoint(
+                x: contentOriginX + width / 2,
+                y: cursor + height / 2
+            )
+            lineLayer.isHidden = true
+            lyricsLayer.addSublayer(lineLayer)
+            karaokeLayers.append(lineLayer)
             cursor += height + 5 * scale
         }
-        activeLayout = nil
-        activeLayoutKey = ""
-    }
-
-    private func drawActiveLine(
-        _ line: LyricLine,
-        centerY: CGFloat,
-        width: CGFloat,
-        position: TimeInterval,
-        prominence: CGFloat
-    ) {
-        let key = "\(line.id)|\(Int(width.rounded()))|\(Int((activeFont.pointSize * 10).rounded()))"
-        if activeLayoutKey != key {
-            activeLayout = KaraokeLineLayout(line: line, font: activeFont, width: width)
-            activeLayoutKey = key
+        let contentHeight = max(0, cursor - 5 * scale)
+        for index in karaokeLayers.indices {
+            let mirroredCenter = contentHeight - lineCenters[index]
+            lineCenters[index] = mirroredCenter
+            karaokeLayers[index].position.y = mirroredCenter
         }
-        guard let layout = activeLayout else { return }
-
-        let origin = NSPoint(
-            x: contentOriginX,
-            y: centerY - layout.height / 2
-        )
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current?.cgContext.setAlpha(prominence)
-        if !line.words.isEmpty {
-            layout.drawKaraoke(at: origin, position: position)
-        } else {
-            layout.drawSolid(at: origin)
-        }
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func drawNeighbor(
-        _ line: LyricLine,
-        index: Int,
-        centerY: CGFloat,
-        width: CGFloat,
-        visualFocus: CGFloat
-    ) {
-        let distance = abs(CGFloat(index) - visualFocus)
-        let proximity = max(0, 1 - min(1, distance - 0.15))
-        let fontSize = (14.5 + proximity * 1.5) * typographyScale
-        let alpha = max(0.18, 0.66 - distance * 0.14)
-        let font = NSFont.systemFont(ofSize: fontSize, weight: proximity > 0.55 ? .medium : .regular)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        let attributed = NSAttributedString(
-            string: line.text.isEmpty ? "·" : line.text,
-            attributes: [
-                .font: font,
-                .foregroundColor: NSColor.labelColor.withAlphaComponent(alpha),
-                .paragraphStyle: paragraph
-            ]
-        )
-        let height = attributed.boundingRect(
-            with: NSSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        ).height
-        attributed.draw(
-            with: NSRect(x: contentOriginX, y: centerY - height / 2, width: width, height: height),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
+        lyricsLayer.isHidden = lines.isEmpty
     }
 
     private func drawMessage(_ text: String) {
@@ -659,19 +641,6 @@ private final class LyricsCanvasView: NSView {
         )
     }
 
-    private func measuredHeight(text: String, font: NSFont, width: CGFloat) -> CGFloat {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        return NSAttributedString(
-            string: text.isEmpty ? "·" : text,
-            attributes: [.font: font, .paragraphStyle: paragraph]
-        ).boundingRect(
-            with: NSSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        ).height
-    }
-
     private func updateClock(_ track: TrackInfo) {
         let now = CACurrentMediaTime()
         let estimated = interpolatedPosition(at: now)
@@ -707,32 +676,172 @@ private final class LyricsCanvasView: NSView {
         return result
     }
 
-    private func damp(
-        _ current: CGFloat?,
-        toward target: CGFloat,
-        delta: CFTimeInterval,
-        response: Double
-    ) -> CGFloat {
-        guard let current else { return target }
-        let blend = 1 - exp(-delta / response)
-        return current + (target - current) * blend
+    private func updateLayerPresentation(animateLineChange: Bool = true) {
+        guard !lines.isEmpty else { return }
+        if !isLiveResizing {
+            rebuildLayersIfNeeded()
+        }
+
+        let frameTime = CACurrentMediaTime()
+        let position = interpolatedPosition(at: frameTime)
+        let resolvedIndex: Int
+        if let index = lineIndex(at: position) {
+            resolvedIndex = index
+        } else {
+            resolvedIndex = 0
+        }
+        let lineChanged = activeIndex != resolvedIndex
+        let previousIndex = activeIndex
+        activeIndex = resolvedIndex
+        guard resolvedIndex < karaokeLayers.count else { return }
+        let needsLineStateUpdate = lineChanged || visualActiveIndex != resolvedIndex
+        let anticipatedIndex = lineIndex(
+            at: position + AnimationSpec.lineScrollHeadstart
+        ) ?? resolvedIndex
+        let scrollIndex = min(resolvedIndex + 1, anticipatedIndex)
+        let needsScrollUpdate = visualScrollIndex != scrollIndex
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if needsLineStateUpdate || !animateLineChange {
+            updateLineStates(activeIndex: resolvedIndex, animated: animateLineChange)
+            if !animateLineChange
+                || previousIndex == nil
+                || abs((previousIndex ?? resolvedIndex) - resolvedIndex) > 1 {
+                for (index, lineLayer) in karaokeLayers.enumerated() where index != resolvedIndex {
+                    lineLayer.updateProgress(
+                        position: position + AnimationSpec.animationHeadstart,
+                        animated: animateLineChange
+                    )
+                }
+            } else if let previousIndex, previousIndex < karaokeLayers.count {
+                karaokeLayers[previousIndex].updateProgress(
+                    position: position + AnimationSpec.animationHeadstart,
+                    animated: animateLineChange
+                )
+            }
+        }
+        if needsScrollUpdate || !animateLineChange {
+            visualScrollIndex = scrollIndex
+            let isContinuousAdvance = previousIndex == nil
+                || abs((previousIndex ?? resolvedIndex) - resolvedIndex) <= 1
+            scroll(
+                to: scrollIndex,
+                animated: animateLineChange && isContinuousAdvance
+            )
+        }
+        karaokeLayers[resolvedIndex].updateProgress(
+            position: position + AnimationSpec.animationHeadstart,
+            animated: animateLineChange
+        )
+        advanceScroll(at: frameTime)
+        CATransaction.commit()
+    }
+
+    private func updateLineStates(activeIndex: Int, animated: Bool) {
+        let previous = visualActiveIndex
+        visualActiveIndex = activeIndex
+        var candidates = Set(max(0, activeIndex - 7)...min(karaokeLayers.count - 1, activeIndex + 7))
+        if let previous {
+            candidates.formUnion(
+                max(0, previous - 7)...min(karaokeLayers.count - 1, previous + 7)
+            )
+        }
+
+        for index in candidates {
+            let lineLayer = karaokeLayers[index]
+            let distance = abs(index - activeIndex)
+            if distance <= 7 {
+                lineLayer.prepareForDisplay()
+            }
+            let opacity: Float = distance == 0 ? 1 : max(0.16, 0.62 - Float(distance) * 0.13)
+            let scale: CGFloat = distance == 0 ? 1 : max(0.82, 0.88 - CGFloat(distance) * 0.015)
+            lineLayer.setVisualState(
+                opacity: opacity,
+                scale: scale,
+                hidden: distance > 5,
+                animated: animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                duration: AnimationSpec.lineStateDuration
+            )
+        }
+    }
+
+    private func scroll(to index: Int, animated: Bool) {
+        let target = lineCenters[index] - bounds.height * 0.44
+        if !isScrollStateInitialized {
+            scrollPosition = lyricsLayer.bounds.origin.y
+            scrollTarget = scrollPosition
+            scrollVelocity = 0
+            scrollSampleTime = CACurrentMediaTime()
+            isScrollStateInitialized = true
+        }
+
+        scrollTarget = target
+        guard animated,
+              isPlaying,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            scrollPosition = target
+            scrollVelocity = 0
+            applyScrollPosition()
+            return
+        }
+    }
+
+    private func advanceScroll(at now: CFTimeInterval) {
+        guard isScrollStateInitialized else { return }
+        var remaining = min(max(0, now - scrollSampleTime), 1.0 / 15.0)
+        scrollSampleTime = now
+
+        // Small fixed integration steps keep the spring stable when the main
+        // thread misses a display refresh, while retaining velocity across lines.
+        while remaining > 0 {
+            let step = min(remaining, 1.0 / 120.0)
+            let delta = CGFloat(step)
+            let acceleration = (
+                AnimationSpec.lineSpringStiffness * (scrollTarget - scrollPosition)
+                    - AnimationSpec.lineSpringDamping * scrollVelocity
+            ) / AnimationSpec.lineSpringMass
+            scrollVelocity += acceleration * delta
+            scrollPosition += scrollVelocity * delta
+            remaining -= step
+        }
+
+        if abs(scrollTarget - scrollPosition) < 0.05,
+           abs(scrollVelocity) < 0.05 {
+            scrollPosition = scrollTarget
+            scrollVelocity = 0
+        }
+        applyScrollPosition()
+    }
+
+    private func applyScrollPosition() {
+        var newBounds = lyricsLayer.bounds
+        newBounds.origin.y = scrollPosition
+        lyricsLayer.bounds = newBounds
+    }
+
+    private func clearKaraokeLayers() {
+        karaokeLayers.forEach { $0.removeFromSuperlayer() }
+        karaokeLayers = []
+        visualActiveIndex = nil
+        visualScrollIndex = nil
+        scrollPosition = 0
+        scrollTarget = 0
+        scrollVelocity = 0
+        scrollSampleTime = 0
+        isScrollStateInitialized = false
+        lyricsLayer.isHidden = true
     }
 
     private func activateTimer() {
-        guard displayTimer == nil,
-              isPlaying,
+        guard isPlaying,
               isWindowVisible,
-              !isLiveResizing,
               !isWindowMoving else { return }
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.needsDisplay = true
-        }
-        displayTimer = timer
-        RunLoop.main.add(timer, forMode: .default)
+        displayLink.start()
     }
 
     private func updateTimerState() {
-        if isPlaying, isWindowVisible, !isLiveResizing, !isWindowMoving, !lines.isEmpty {
+        if isPlaying, isWindowVisible, !isWindowMoving, !lines.isEmpty {
             activateTimer()
         } else {
             stopTimer()
@@ -740,165 +849,595 @@ private final class LyricsCanvasView: NSView {
     }
 
     private func stopTimer() {
-        displayTimer?.invalidate()
-        displayTimer = nil
+        displayLink.stop()
     }
 }
 
-// MARK: - TextKit karaoke line
+private final class DisplayLinkDriver {
+    private let onFrame: () -> Void
+    private let lock = NSLock()
+    private var displayLink: CVDisplayLink?
+    private var framePending = false
 
-private final class KaraokeLineLayout {
+    init(onFrame: @escaping () -> Void) {
+        self.onFrame = onFrame
+    }
+
+    deinit {
+        stop()
+    }
+
+    func start() {
+        if displayLink == nil {
+            var link: CVDisplayLink?
+            guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess,
+                  let link else { return }
+            CVDisplayLinkSetOutputCallback(
+                link,
+                { _, _, _, _, _, context in
+                    guard let context else { return kCVReturnError }
+                    Unmanaged<DisplayLinkDriver>
+                        .fromOpaque(context)
+                        .takeUnretainedValue()
+                        .scheduleFrame()
+                    return kCVReturnSuccess
+                },
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+            displayLink = link
+        }
+        guard let displayLink, !CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStart(displayLink)
+    }
+
+    func stop() {
+        guard let displayLink, CVDisplayLinkIsRunning(displayLink) else { return }
+        CVDisplayLinkStop(displayLink)
+        lock.lock()
+        framePending = false
+        lock.unlock()
+    }
+
+    private func scheduleFrame() {
+        lock.lock()
+        guard !framePending else {
+            lock.unlock()
+            return
+        }
+        framePending = true
+        lock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            self.framePending = false
+            self.lock.unlock()
+            self.onFrame()
+        }
+    }
+}
+
+// MARK: - Retained karaoke layers
+
+private class NoImplicitAnimationLayer: CALayer {
+    override init() {
+        super.init()
+    }
+
+    override init(layer: Any) {
+        super.init(layer: layer)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func action(forKey event: String) -> (any CAAction)? {
+        nil
+    }
+}
+
+private final class KaraokeTextLayer: NoImplicitAnimationLayer {
+    struct GlyphFragment {
+        let glyphRange: NSRange
+        let rect: CGRect
+    }
+
+    private let storage: NSTextStorage
+    private let textLayoutManager: NSLayoutManager
+    private let textContainer: NSTextContainer
+
+    let textHeight: CGFloat
+
+    init(text: String, font: NSFont, color: NSColor, width: CGFloat, scale: CGFloat) {
+        textLayoutManager = NSLayoutManager()
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineSpacing = 1
+        storage = NSTextStorage(
+            string: text.isEmpty ? "·" : text,
+            attributes: [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: paragraph
+            ]
+        )
+        textContainer = NSTextContainer(
+            size: NSSize(width: width, height: .greatestFiniteMagnitude)
+        )
+        textContainer.lineFragmentPadding = 0
+        textContainer.maximumNumberOfLines = 0
+        textLayoutManager.addTextContainer(textContainer)
+        storage.addLayoutManager(textLayoutManager)
+        textLayoutManager.ensureLayout(for: textContainer)
+        textHeight = ceil(max(1, textLayoutManager.usedRect(for: textContainer).height))
+
+        super.init()
+        contentsScale = scale
+        drawsAsynchronously = false
+        bounds = CGRect(x: 0, y: 0, width: width, height: textHeight)
+        setNeedsDisplay()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override init(layer: Any) {
+        guard let source = layer as? KaraokeTextLayer else {
+            fatalError("Unexpected layer copy")
+        }
+        storage = source.storage
+        textLayoutManager = source.textLayoutManager
+        textContainer = source.textContainer
+        textHeight = source.textHeight
+        super.init(layer: layer)
+    }
+
+    override func draw(in context: CGContext) {
+        drawGlyphs(
+            in: context,
+            glyphRange: textLayoutManager.glyphRange(for: textContainer),
+            at: .zero
+        )
+    }
+
+    func drawGlyphs(in context: CGContext, glyphRange: NSRange, at origin: CGPoint) {
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        textLayoutManager.drawGlyphs(
+            forGlyphRange: glyphRange,
+            at: origin
+        )
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    func prepareForDisplay() {
+        displayIfNeeded()
+    }
+
+    func fragments(for characterRange: NSRange) -> [GlyphFragment] {
+        let glyphRange = textLayoutManager.glyphRange(
+            forCharacterRange: characterRange,
+            actualCharacterRange: nil
+        )
+        var result: [GlyphFragment] = []
+        var glyphIndex = glyphRange.location
+        let end = NSMaxRange(glyphRange)
+
+        while glyphIndex < end {
+            var lineRange = NSRange()
+            _ = textLayoutManager.lineFragmentUsedRect(
+                forGlyphAt: glyphIndex,
+                effectiveRange: &lineRange
+            )
+            let intersection = NSIntersectionRange(lineRange, glyphRange)
+            if intersection.length > 0 {
+                result.append(
+                    GlyphFragment(
+                        glyphRange: intersection,
+                        rect: textLayoutManager.boundingRect(
+                            forGlyphRange: intersection,
+                            in: textContainer
+                        )
+                    )
+                )
+            }
+            let next = NSMaxRange(lineRange)
+            if next <= glyphIndex { break }
+            glyphIndex = next
+        }
+        return result
+    }
+}
+
+private final class KaraokeGlyphFragmentLayer: NoImplicitAnimationLayer {
+    private let source: KaraokeTextLayer
+    private let glyphRange: NSRange
+    private let textRect: CGRect
+
+    init(source: KaraokeTextLayer, fragment: KaraokeTextLayer.GlyphFragment) {
+        self.source = source
+        glyphRange = fragment.glyphRange
+        textRect = fragment.rect
+        super.init()
+        contentsScale = source.contentsScale
+        drawsAsynchronously = false
+        frame = fragment.rect
+        setNeedsDisplay()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override init(layer: Any) {
+        guard let sourceLayer = layer as? KaraokeGlyphFragmentLayer else {
+            fatalError("Unexpected layer copy")
+        }
+        source = sourceLayer.source
+        glyphRange = sourceLayer.glyphRange
+        textRect = sourceLayer.textRect
+        super.init(layer: layer)
+    }
+
+    override func draw(in context: CGContext) {
+        source.drawGlyphs(
+            in: context,
+            glyphRange: glyphRange,
+            at: CGPoint(x: -textRect.minX, y: -textRect.minY)
+        )
+    }
+
+    func prepareForDisplay() {
+        displayIfNeeded()
+    }
+}
+
+private final class ProgressMaskSegmentLayer: NoImplicitAnimationLayer {
+    private let fillLayer: NoImplicitAnimationLayer
+    private let gradientLayer: CAGradientLayer
+    private let segmentWidth: CGFloat
+    private let featherWidth: CGFloat
+    private var lastFraction: CGFloat = -1
+
+    init(rect: CGRect, featherWidth: CGFloat) {
+        fillLayer = NoImplicitAnimationLayer()
+        gradientLayer = CAGradientLayer()
+        segmentWidth = rect.width
+        self.featherWidth = min(featherWidth, max(1, rect.width))
+        super.init()
+        frame = rect.insetBy(dx: 0, dy: -2)
+        masksToBounds = true
+        fillLayer.backgroundColor = NSColor.white.cgColor
+        gradientLayer.colors = [NSColor.white.cgColor, NSColor.clear.cgColor]
+        gradientLayer.locations = [0, 1]
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 0.5)
+        addSublayer(fillLayer)
+        addSublayer(gradientLayer)
+        update(fraction: 0)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override init(layer: Any) {
+        guard let source = layer as? ProgressMaskSegmentLayer else {
+            fatalError("Unexpected layer copy")
+        }
+        fillLayer = source.fillLayer
+        gradientLayer = source.gradientLayer
+        segmentWidth = source.segmentWidth
+        featherWidth = source.featherWidth
+        lastFraction = source.lastFraction
+        super.init(layer: layer)
+    }
+
+    func update(fraction: Double) {
+        let fraction = CGFloat(min(1, max(0, fraction)))
+        if (fraction == 0 && lastFraction == 0)
+            || (fraction == 1 && lastFraction == 1) {
+            return
+        }
+        lastFraction = fraction
+        guard fraction > 0 else {
+            isHidden = true
+            return
+        }
+        isHidden = false
+        if fraction >= 1 {
+            fillLayer.frame = bounds
+            gradientLayer.isHidden = true
+            return
+        }
+
+        let width = segmentWidth * fraction
+        fillLayer.frame = CGRect(
+            x: 0,
+            y: 0,
+            width: max(0, width - featherWidth),
+            height: bounds.height
+        )
+        gradientLayer.isHidden = false
+        gradientLayer.frame = CGRect(
+            x: width - featherWidth,
+            y: 0,
+            width: featherWidth,
+            height: bounds.height
+        )
+    }
+}
+
+private final class TimedGlyphUnitLayer: NoImplicitAnimationLayer {
+    private let lift: CGFloat
+    private var fragmentLayers: [KaraokeGlyphFragmentLayer] = []
+    private var isLifted = false
+
+    init(size: CGSize, lift: CGFloat) {
+        self.lift = lift
+        super.init()
+        bounds = CGRect(origin: .zero, size: size)
+        anchorPoint = .zero
+        position = .zero
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override init(layer: Any) {
+        guard let source = layer as? TimedGlyphUnitLayer else {
+            fatalError("Unexpected layer copy")
+        }
+        lift = source.lift
+        fragmentLayers = source.fragmentLayers
+        isLifted = source.isLifted
+        super.init(layer: layer)
+    }
+
+    func addFragment(_ layer: KaraokeGlyphFragmentLayer) {
+        fragmentLayers.append(layer)
+        addSublayer(layer)
+    }
+
+    func prepareForDisplay() {
+        fragmentLayers.forEach { $0.prepareForDisplay() }
+    }
+
+    func setLifted(_ lifted: Bool, animated: Bool) {
+        guard isLifted != lifted else { return }
+        isLifted = lifted
+        let target = CATransform3DMakeTranslation(0, lifted ? -lift : 0, 0)
+        let current = presentation()?.transform ?? transform
+        transform = target
+
+        guard animated else {
+            removeAnimation(forKey: "syllableLift")
+            return
+        }
+        let spring = CASpringAnimation(keyPath: "transform")
+        spring.fromValue = current
+        spring.toValue = target
+        spring.mass = 1
+        spring.stiffness = 14
+        spring.damping = 7
+        spring.duration = spring.settlingDuration
+        add(spring, forKey: "syllableLift")
+    }
+}
+
+private final class KaraokeLineLayer: NoImplicitAnimationLayer {
     private struct TimedRange {
         let characterRange: NSRange
         let start: TimeInterval
         let end: TimeInterval
     }
 
-    private let upcomingStorage: NSTextStorage
-    private let upcomingLayout = NSLayoutManager()
-    private let upcomingContainer: NSTextContainer
-    private let sungStorage: NSTextStorage
-    private let sungLayout = NSLayoutManager()
-    private let sungContainer: NSTextContainer
+    private struct TimedMask {
+        let start: TimeInterval
+        let end: TimeInterval
+        let layer: ProgressMaskSegmentLayer
+    }
+
+    private struct TimedUnit {
+        let start: TimeInterval
+        let layer: TimedGlyphUnitLayer
+    }
+
+    private let upcomingLayer: KaraokeTextLayer
+    private let highlightedLayer: KaraokeTextLayer
     private let ranges: [TimedRange]
-    private let fullGlyphRange: NSRange
+    private var timedMasks: [TimedMask] = []
+    private var timedUnits: [TimedUnit] = []
 
-    let height: CGFloat
+    let textHeight: CGFloat
 
-    init(line: LyricLine, font: NSFont, width: CGFloat) {
+    init(
+        line: LyricLine,
+        fallbackEnd: TimeInterval,
+        font: NSFont,
+        width: CGFloat,
+        contentsScale: CGFloat,
+        featherWidth: CGFloat
+    ) {
         let text = line.words.isEmpty ? line.text : line.words.map(\.text).joined()
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        paragraph.lineSpacing = 1
-
-        upcomingStorage = NSTextStorage(
-            string: text,
-            attributes: [
-                .font: font,
-                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.30),
-                .paragraphStyle: paragraph
-            ]
+        upcomingLayer = KaraokeTextLayer(
+            text: text,
+            font: font,
+            color: NSColor.labelColor.withAlphaComponent(0.30),
+            width: width,
+            scale: contentsScale
         )
-        sungStorage = NSTextStorage(
-            string: text,
-            attributes: [
-                .font: font,
-                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.97),
-                .paragraphStyle: paragraph
-            ]
+        highlightedLayer = KaraokeTextLayer(
+            text: text,
+            font: font,
+            color: NSColor.labelColor.withAlphaComponent(0.98),
+            width: width,
+            scale: contentsScale
         )
-
-        upcomingContainer = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
-        sungContainer = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
-        upcomingContainer.lineFragmentPadding = 0
-        sungContainer.lineFragmentPadding = 0
-        upcomingContainer.maximumNumberOfLines = 0
-        sungContainer.maximumNumberOfLines = 0
-
-        upcomingLayout.addTextContainer(upcomingContainer)
-        sungLayout.addTextContainer(sungContainer)
-        upcomingStorage.addLayoutManager(upcomingLayout)
-        sungStorage.addLayoutManager(sungLayout)
-        upcomingLayout.ensureLayout(for: upcomingContainer)
-        sungLayout.ensureLayout(for: sungContainer)
-
-        fullGlyphRange = upcomingLayout.glyphRange(for: upcomingContainer)
-        height = ceil(max(1, upcomingLayout.usedRect(for: upcomingContainer).height))
+        textHeight = upcomingLayer.textHeight
 
         var location = 0
         var built: [TimedRange] = []
-        for word in line.words {
-            let length = (word.text as NSString).length
+        if line.words.isEmpty {
+            let length = (text as NSString).length
             if length > 0 {
                 built.append(
                     TimedRange(
-                        characterRange: NSRange(location: location, length: length),
-                        start: word.start,
-                        end: word.end
+                        characterRange: NSRange(location: 0, length: length),
+                        start: line.time,
+                        end: fallbackEnd
                     )
                 )
+            }
+        } else {
+            for word in line.words {
+                let length = (word.text as NSString).length
+                if length > 0 {
+                    built.append(
+                        TimedRange(
+                            characterRange: NSRange(location: location, length: length),
+                            start: word.start,
+                            end: word.end
+                        )
+                    )
+                }
                 location += length
             }
         }
         ranges = built
-    }
-
-    func drawSolid(at origin: NSPoint) {
-        sungLayout.drawGlyphs(forGlyphRange: fullGlyphRange, at: origin)
-    }
-
-    func drawKaraoke(at origin: NSPoint, position: TimeInterval) {
-        upcomingLayout.drawGlyphs(forGlyphRange: fullGlyphRange, at: origin)
-        let sungClip = NSBezierPath()
+        super.init()
+        isGeometryFlipped = true
 
         for range in ranges {
-            let duration = max(0.01, range.end - range.start)
-            let fraction = min(1, max(0, (position - range.start) / duration))
-            guard fraction > 0 else { continue }
-
-            let glyphRange = sungLayout.glyphRange(
-                forCharacterRange: range.characterRange,
-                actualCharacterRange: nil
+            let upcomingFragments = upcomingLayer.fragments(for: range.characterRange)
+            let highlightedFragments = highlightedLayer.fragments(for: range.characterRange)
+            let totalWidth = upcomingFragments.reduce(CGFloat(0)) { $0 + $1.rect.width }
+            let unit = TimedGlyphUnitLayer(
+                size: CGSize(width: width, height: textHeight),
+                lift: max(1.5, font.pointSize * 0.12)
             )
-            appendClipRects(
-                for: glyphRange,
-                fraction: fraction,
-                origin: origin,
-                to: sungClip
-            )
-        }
+            var consumedWidth: CGFloat = 0
+            for (upcomingFragment, highlightedFragment) in zip(
+                upcomingFragments,
+                highlightedFragments
+            ) where upcomingFragment.rect.width > 0 {
+                let duration = max(0.01, range.end - range.start)
+                let fragmentStart = range.start
+                    + duration * TimeInterval(consumedWidth / max(1, totalWidth))
+                consumedWidth += upcomingFragment.rect.width
+                let fragmentEnd = range.start
+                    + duration * TimeInterval(consumedWidth / max(1, totalWidth))
 
-        guard sungClip.elementCount > 0 else { return }
-        NSGraphicsContext.saveGraphicsState()
-        sungClip.addClip()
-        sungLayout.drawGlyphs(forGlyphRange: fullGlyphRange, at: origin)
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func appendClipRects(
-        for glyphRange: NSRange,
-        fraction: Double,
-        origin: NSPoint,
-        to path: NSBezierPath
-    ) {
-        let rects = lineRects(for: glyphRange)
-        let totalWidth = rects.reduce(CGFloat(0)) { $0 + $1.width }
-        var remaining = totalWidth * fraction
-
-        for rect in rects where remaining > 0 {
-            let width = min(rect.width, remaining)
-            path.appendRect(
-                NSRect(
-                    x: origin.x + rect.minX,
-                    y: origin.y + rect.minY,
-                    width: width,
-                    height: rect.height
+                let upcomingSlice = KaraokeGlyphFragmentLayer(
+                    source: upcomingLayer,
+                    fragment: upcomingFragment
                 )
+                let highlightedSlice = KaraokeGlyphFragmentLayer(
+                    source: highlightedLayer,
+                    fragment: highlightedFragment
+                )
+                let mask = ProgressMaskSegmentLayer(
+                    rect: CGRect(origin: .zero, size: highlightedFragment.rect.size),
+                    featherWidth: featherWidth
+                )
+                highlightedSlice.mask = mask
+                unit.addFragment(upcomingSlice)
+                unit.addFragment(highlightedSlice)
+                timedMasks.append(
+                    TimedMask(start: fragmentStart, end: fragmentEnd, layer: mask)
+                )
+            }
+            addSublayer(unit)
+            timedUnits.append(
+                TimedUnit(start: range.start, layer: unit)
             )
-            remaining -= width
         }
     }
 
-    private func lineRects(for glyphRange: NSRange) -> [NSRect] {
-        var rects: [NSRect] = []
-        var glyphIndex = glyphRange.location
-        let end = NSMaxRange(glyphRange)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-        while glyphIndex < end {
-            var lineRange = NSRange()
-            _ = sungLayout.lineFragmentUsedRect(
-                forGlyphAt: glyphIndex,
-                effectiveRange: &lineRange
-            )
-            let intersection = NSIntersectionRange(lineRange, glyphRange)
-            if intersection.length > 0 {
-                rects.append(sungLayout.boundingRect(forGlyphRange: intersection, in: sungContainer))
-            }
-            let next = NSMaxRange(lineRange)
-            if next <= glyphIndex { break }
-            glyphIndex = next
+    override init(layer: Any) {
+        guard let source = layer as? KaraokeLineLayer else {
+            fatalError("Unexpected layer copy")
         }
-        return rects
+        upcomingLayer = source.upcomingLayer
+        highlightedLayer = source.highlightedLayer
+        ranges = source.ranges
+        timedMasks = source.timedMasks
+        timedUnits = source.timedUnits
+        textHeight = source.textHeight
+        super.init(layer: layer)
+    }
+
+    override var bounds: CGRect {
+        didSet {
+            timedUnits.forEach {
+                $0.layer.bounds = CGRect(origin: .zero, size: bounds.size)
+            }
+        }
+    }
+
+    func updateProgress(position: TimeInterval, animated: Bool = true) {
+        for timedMask in timedMasks {
+            let duration = max(0.01, timedMask.end - timedMask.start)
+            timedMask.layer.update(
+                fraction: (position - timedMask.start) / duration
+            )
+        }
+        for timedUnit in timedUnits {
+            timedUnit.layer.setLifted(
+                position >= timedUnit.start,
+                animated: animated
+            )
+        }
+    }
+
+    func prepareForDisplay() {
+        timedUnits.forEach { $0.layer.prepareForDisplay() }
+    }
+
+    func setVisualState(
+        opacity: Float,
+        scale: CGFloat,
+        hidden: Bool,
+        animated: Bool,
+        duration: CFTimeInterval
+    ) {
+        let targetTransform = CATransform3DMakeScale(scale, scale, 1)
+        if isHidden == hidden,
+           abs(self.opacity - opacity) < 0.001,
+           CATransform3DEqualToTransform(transform, targetTransform) {
+            return
+        }
+        isHidden = hidden
+        let oldOpacity = presentation()?.opacity ?? self.opacity
+        let oldTransform = presentation()?.transform ?? transform
+        self.opacity = opacity
+        transform = targetTransform
+        guard animated else {
+            removeAnimation(forKey: "lineOpacity")
+            removeAnimation(forKey: "lineScale")
+            return
+        }
+
+        let opacityAnimation = CABasicAnimation(keyPath: "opacity")
+        opacityAnimation.fromValue = oldOpacity
+        opacityAnimation.toValue = opacity
+        opacityAnimation.duration = duration
+        opacityAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        add(opacityAnimation, forKey: "lineOpacity")
+
+        let scaleAnimation = CABasicAnimation(keyPath: "transform")
+        scaleAnimation.fromValue = oldTransform
+        scaleAnimation.toValue = transform
+        scaleAnimation.duration = duration
+        scaleAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        add(scaleAnimation, forKey: "lineScale")
     }
 }

@@ -10,6 +10,7 @@ APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
+HELPERS="$CONTENTS/Helpers"
 ENTITLEMENTS="$ROOT/AppleMusicLyrics.entitlements"
 APP_ICON="$ROOT/Resources/AppIcon.icns"
 VERSION="${VERSION:-1.0.0}"
@@ -40,17 +41,23 @@ swift build "${BUILD_ARGS[@]}"
 
 BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 BIN="$BIN_DIR/AppleMusicLyrics"
+HELPER_BIN="$BIN_DIR/AppleMusicLyricsPlaybackHelper"
 if [[ ! -x "$BIN" ]]; then
   echo "Binary not found: $BIN" >&2
+  exit 1
+fi
+if [[ ! -x "$HELPER_BIN" ]]; then
+  echo "Helper binary not found: $HELPER_BIN" >&2
   exit 1
 fi
 
 echo "→ Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$MACOS" "$RESOURCES"
+mkdir -p "$MACOS" "$RESOURCES" "$HELPERS"
 cp "$BIN" "$MACOS/AppleMusicLyrics"
+cp "$HELPER_BIN" "$HELPERS/AppleMusicLyricsPlaybackHelper"
 cp "$APP_ICON" "$RESOURCES/AppIcon.icns"
-chmod +x "$MACOS/AppleMusicLyrics"
+chmod +x "$MACOS/AppleMusicLyrics" "$HELPERS/AppleMusicLyricsPlaybackHelper"
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -91,6 +98,12 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
 
 echo "→ Signing app with identity: $CODESIGN_IDENTITY"
+/usr/bin/codesign \
+  --force \
+  --options runtime \
+  --entitlements "$ENTITLEMENTS" \
+  --sign "$CODESIGN_IDENTITY" \
+  "$HELPERS/AppleMusicLyricsPlaybackHelper"
 /usr/bin/codesign \
   --force \
   --deep \

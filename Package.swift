@@ -11,6 +11,10 @@ let package = Package(
             name: "AppleMusicLyrics",
             path: "Sources/AppleMusicLyrics"
         ),
+        .executableTarget(
+            name: "AppleMusicLyricsPlaybackHelper",
+            path: "Sources/PlaybackHelper"
+        ),
         .testTarget(
             name: "AppleMusicLyricsTests",
             dependencies: ["AppleMusicLyrics"],
