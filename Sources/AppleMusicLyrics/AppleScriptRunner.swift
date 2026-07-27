@@ -2,10 +2,14 @@ import Foundation
 
 enum AppleScriptRunner {
     static func run(_ source: String) -> Result<String, Error> {
-        var errorInfo: NSDictionary?
         guard let script = NSAppleScript(source: source) else {
             return .failure(AppleScriptError.failedToCreate)
         }
+        return run(script)
+    }
+
+    static func run(_ script: NSAppleScript) -> Result<String, Error> {
+        var errorInfo: NSDictionary?
         let result = script.executeAndReturnError(&errorInfo)
         if let errorInfo {
             let message = errorInfo[NSAppleScript.errorMessage] as? String

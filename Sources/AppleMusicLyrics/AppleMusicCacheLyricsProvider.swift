@@ -23,8 +23,8 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
     func lyrics(for track: TrackInfo) -> LyricsDocument {
         var best: (score: Int, song: CatalogSong)?
 
-        for url in candidateURLs() {
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+        for candidate in candidates() {
+            guard let data = candidate.data(),
                   let response = try? JSONDecoder().decode(CatalogResponse.self, from: data) else {
                 continue
             }
@@ -63,22 +63,22 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
 
     // MARK: - Cache index
 
-    private func candidateURLs() -> [URL] {
-        let names = indexedFileNames()
-        if !names.isEmpty {
-            return names.compactMap(cacheFileURL(named:))
-        }
+    private func candidates() -> [CacheCandidate] {
+        let indexed = indexedCandidates()
+        var candidates = indexed
+        var indexedPaths = Set(indexed.compactMap(\.fileURL))
 
-        // The database is private implementation detail. If its schema changes,
-        // fall back to recently modified cache files and validate every JSON body.
+        // The database is a private implementation detail. Always append recent
+        // files as a fallback because an index can exist while containing stale
+        // paths after a Music or macOS update.
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey]
         guard let urls = try? fileManager.contentsOfDirectory(
             at: cacheDirectory,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles]
-        ) else { return [] }
+        ) else { return candidates }
 
-        return urls
+        let recentFiles = urls
             .filter { (try? $0.resourceValues(forKeys: keys).isRegularFile) == true }
             .sorted {
                 let lhs = try? $0.resourceValues(forKeys: keys).contentModificationDate
@@ -86,21 +86,23 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
                 return (lhs ?? .distantPast) > (rhs ?? .distantPast)
             }
             .prefix(maximumCandidates)
-            .map { $0 }
+        for url in recentFiles where indexedPaths.insert(url).inserted {
+            candidates.append(.file(url))
+        }
+        return candidates
     }
 
-    private func indexedFileNames() -> [String] {
+    private func indexedCandidates() -> [CacheCandidate] {
         guard fileManager.isReadableFile(atPath: databaseURL.path),
               fileManager.isExecutableFile(atPath: "/usr/bin/sqlite3") else {
             return []
         }
 
         let query = """
-        SELECT CAST(d.receiver_data AS TEXT)
+        SELECT d.isDataOnFS || char(9) || hex(d.receiver_data)
         FROM cfurl_cache_response r
         JOIN cfurl_cache_receiver_data d USING(entry_ID)
-        WHERE d.isDataOnFS = 1
-          AND r.request_key LIKE '%syllable-lyrics%'
+        WHERE r.request_key LIKE '%syllable-lyrics%'
         ORDER BY r.time_stamp DESC
         LIMIT \(maximumCandidates);
         """
@@ -120,7 +122,21 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
                   let raw = String(data: data, encoding: .utf8) else {
                 return []
             }
-            return raw.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            return raw.components(separatedBy: .newlines).compactMap { row in
+                let fields = row.split(separator: "\t", maxSplits: 1).map(String.init)
+                guard fields.count == 2, let payload = Data(hexEncoded: fields[1]) else {
+                    return nil
+                }
+                if fields[0] == "1",
+                   let name = String(data: payload, encoding: .utf8),
+                   let url = cacheFileURL(named: name) {
+                    return .file(url)
+                }
+                if fields[0] == "0" {
+                    return .inline(payload)
+                }
+                return nil
+            }
         } catch {
             return []
         }
@@ -186,14 +202,19 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         return String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
     }
 
-    private func localizedTTML(from raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("<") { return trimmed }
-
-        // Some Music releases wrap localizations in a JSON object.
-        guard let data = trimmed.data(using: .utf8),
-              let localizations = try? JSONDecoder().decode([String: String].self, from: data) else {
-            return nil
+    private func localizedTTML(from value: TTMLLocalizations) -> String? {
+        let localizations: [String: String]
+        switch value {
+        case .ttml(let raw):
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("<") { return trimmed }
+            guard let data = trimmed.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+                return nil
+            }
+            localizations = decoded
+        case .localized(let values):
+            localizations = values
         }
         let preferred = Locale.preferredLanguages
         for language in preferred {
@@ -204,6 +225,41 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             }
         }
         return localizations.values.first
+    }
+}
+
+private enum CacheCandidate {
+    case file(URL)
+    case inline(Data)
+
+    var fileURL: URL? {
+        guard case .file(let url) = self else { return nil }
+        return url
+    }
+
+    func data() -> Data? {
+        switch self {
+        case .file(let url):
+            return try? Data(contentsOf: url, options: .mappedIfSafe)
+        case .inline(let data):
+            return data
+        }
+    }
+}
+
+private extension Data {
+    init?(hexEncoded value: String) {
+        guard value.count.isMultiple(of: 2) else { return nil }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(value.count / 2)
+        var index = value.startIndex
+        while index < value.endIndex {
+            let end = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<end], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = end
+        }
+        self.init(bytes)
     }
 }
 
@@ -240,5 +296,19 @@ private struct CatalogLyric: Decodable {
 }
 
 private struct CatalogLyricAttributes: Decodable {
-    let ttmlLocalizations: String?
+    let ttmlLocalizations: TTMLLocalizations?
+}
+
+private enum TTMLLocalizations: Decodable {
+    case ttml(String)
+    case localized([String: String])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(String.self) {
+            self = .ttml(value)
+        } else {
+            self = .localized(try container.decode([String: String].self))
+        }
+    }
 }

@@ -5,6 +5,17 @@ final class NowPlayingService: @unchecked Sendable {
     private let delimiter = "\u{1F}"
     private let musicBundleIdentifier = "com.apple.Music"
 
+    private lazy var playerStateScript = NSAppleScript(source: """
+        tell application "Music"
+            if player state is stopped then
+                return "STOPPED"
+            end if
+            set t to current track
+            set delim to "\(delimiter)"
+            return (name of t) & delim & (artist of t) & delim & (album of t) & delim & (player state as text) & delim & (player position as text) & delim & (duration of t as text)
+        end tell
+        """)
+
     var isMusicRunning: Bool {
         !NSRunningApplication.runningApplications(
             withBundleIdentifier: musicBundleIdentifier
@@ -15,18 +26,11 @@ final class NowPlayingService: @unchecked Sendable {
         // Avoid launching Music if it isn't already running.
         guard isMusicRunning else { return .success(nil) }
 
-        let script = """
-        tell application "Music"
-            if player state is stopped then
-                return "STOPPED"
-            end if
-            set t to current track
-            set delim to "\(delimiter)"
-            return (name of t) & delim & (artist of t) & delim & (album of t) & delim & (player state as text) & delim & (player position as text) & delim & (duration of t as text)
-        end tell
-        """
+        guard let playerStateScript else {
+            return .failure(AppleScriptError.failedToCreate)
+        }
 
-        switch AppleScriptRunner.run(script) {
+        switch AppleScriptRunner.run(playerStateScript) {
         case .failure(let error):
             return .failure(error)
         case .success(let raw):

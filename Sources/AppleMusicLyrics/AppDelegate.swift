@@ -3,11 +3,11 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let menuBar = MenuBarController()
     private let floating = FloatingLyricsController()
-    private let nowPlaying = NowPlayingService()
+    private let playbackMonitor = PlaybackMonitor()
     private let lyricsService = LyricsService()
 
-    private var pollTimer: Timer?
     private var currentTrackKey: String?
+    private var latestTrack: TrackInfo?
     private var currentLyrics: LyricsDocument = .empty
     private var isLoadingLyrics = false
     private var showsLoadingState = false
@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastTrackKeyForUI: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        playbackMonitor.onUpdate = { [weak self] result in
+            self?.handlePlaybackUpdate(result)
+        }
         menuBar.onRefreshLyrics = { [weak self] in
             self?.forceRefreshLyrics()
         }
@@ -38,28 +41,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuBar.apply(status: .idle)
         floating.apply(status: .idle)
-        startPolling()
+        playbackMonitor.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        pollTimer?.invalidate()
+        playbackMonitor.stop()
     }
 
-    // MARK: - Polling
+    // MARK: - Playback updates
 
-    private func startPolling() {
-        // ~12 fps is enough for smooth 逐字 highlighting without heavy AppleScript load.
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        if let pollTimer {
-            RunLoop.main.add(pollTimer, forMode: .common)
-        }
-        tick()
-    }
-
-    private func tick() {
-        switch nowPlaying.fetch() {
+    private func handlePlaybackUpdate(_ result: PlaybackMonitor.Update) {
+        switch result {
         case .failure(let error):
             let message = error.localizedDescription
             if message.localizedCaseInsensitiveContains("not allowed")
@@ -70,17 +62,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 apply(.error(message))
             }
 
-        case .success(let track?):
+        case .track(let track):
+            latestTrack = track
             handle(track: track)
 
-        case .success(nil):
+        case .stopped:
+            latestTrack = nil
             currentTrackKey = nil
             currentLyrics = .empty
-            if nowPlaying.isMusicRunning {
-                apply(.stopped)
-            } else {
-                apply(.musicNotRunning)
-            }
+            apply(.stopped)
+
+        case .musicNotRunning:
+            latestTrack = nil
+            currentTrackKey = nil
+            currentLyrics = .empty
+            apply(.musicNotRunning)
         }
     }
 
@@ -132,7 +128,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.currentLyrics = document
                 self.isLoadingLyrics = false
                 self.showsLoadingState = false
-                self.tick()
+                if let latestTrack = self.latestTrack,
+                   latestTrack.identityKey == key {
+                    self.handle(track: latestTrack)
+                }
             }
         }
     }
@@ -142,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDisplayedLine = nil
         lastTrackKeyForUI = nil
         forceRefresh = true
-        tick()
+        playbackMonitor.sampleNow()
     }
 
     private func apply(_ status: AppStatus) {

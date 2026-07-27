@@ -427,13 +427,17 @@ private final class KaraokeStatusTitleView: NSView {
         isPlaying = track.state == .playing
 
         rebuildDisplay(line: line, paused: track.state == .paused, limit: limit)
-        activateTimer()
+        if isPlaying {
+            activateTimer()
+        } else {
+            stopTimer()
+        }
+        needsDisplay = true
         return displayText
     }
 
     func deactivate() {
-        displayTimer?.invalidate()
-        displayTimer = nil
+        stopTimer()
         displayText = ""
         segments = []
         currentLineID = nil
@@ -637,12 +641,17 @@ private final class KaraokeStatusTitleView: NSView {
     }
 
     private func activateTimer() {
-        guard displayTimer == nil else { return }
+        guard displayTimer == nil, isPlaying else { return }
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.needsDisplay = true
         }
         displayTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .default)
+    }
+
+    private func stopTimer() {
+        displayTimer?.invalidate()
+        displayTimer = nil
     }
 
     private func interpolatedPosition(at now: CFTimeInterval) -> TimeInterval {

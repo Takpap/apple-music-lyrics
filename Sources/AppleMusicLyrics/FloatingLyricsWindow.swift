@@ -7,6 +7,8 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     private let titleLabel = NSTextField(labelWithString: "No track")
     private let subtitleLabel = NSTextField(labelWithString: "")
     private let canvas = LyricsCanvasView()
+    private var frameSaveWorkItem: DispatchWorkItem?
+    private var moveEndWorkItem: DispatchWorkItem?
 
     var onVisibilityChanged: ((Bool) -> Void)?
 
@@ -87,11 +89,13 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
 
     func show() {
         panel.orderFrontRegardless()
+        canvas.setWindowVisible(true)
         onVisibilityChanged?(true)
         saveFrame()
     }
 
     func hide() {
+        canvas.setWindowVisible(false)
         panel.orderOut(nil)
         onVisibilityChanged?(false)
         saveFrame()
@@ -164,7 +168,18 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     private var frameDefaultsKey: String { "floatingLyrics.frame" }
 
     private func saveFrame() {
+        frameSaveWorkItem?.cancel()
+        frameSaveWorkItem = nil
         UserDefaults.standard.set(NSStringFromRect(panel.frame), forKey: frameDefaultsKey)
+    }
+
+    private func scheduleFrameSave() {
+        frameSaveWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.saveFrame()
+        }
+        frameSaveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
 
     private func restoreFrame() {
@@ -187,13 +202,30 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        canvas.setWindowVisible(false)
         onVisibilityChanged?(false)
         saveFrame()
     }
 
+    func windowWillMove(_ notification: Notification) {
+        moveEndWorkItem?.cancel()
+        panel.hasShadow = false
+        canvas.beginWindowMove()
+    }
+
     func windowDidMove(_ notification: Notification) {
         guard !panel.inLiveResize else { return }
-        saveFrame()
+        scheduleFrameSave()
+
+        moveEndWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.canvas.endWindowMove()
+            self.panel.hasShadow = true
+            self.panel.invalidateShadow()
+        }
+        moveEndWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
@@ -203,7 +235,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
 
     func windowDidResize(_ notification: Notification) {
         guard !panel.inLiveResize else { return }
-        saveFrame()
+        scheduleFrameSave()
         canvas.invalidateGeometry()
     }
 
@@ -249,7 +281,6 @@ private final class LyricsCanvasView: NSView {
     }
 
     private var lines: [LyricLine] = []
-    private var timing: WordTimingQuality = .none
     private var activeIndex: Int?
     private var message: String?
     private var plainText: String?
@@ -265,7 +296,8 @@ private final class LyricsCanvasView: NSView {
     private var lastFrameTime = CACurrentMediaTime()
     private var displayTimer: Timer?
     private var isLiveResizing = false
-    private var liveResizeSnapshot: NSImage?
+    private var isWindowMoving = false
+    private var isWindowVisible = false
 
     private var basePosition: TimeInterval = 0
     private var sampledAt = CACurrentMediaTime()
@@ -321,7 +353,6 @@ private final class LyricsCanvasView: NSView {
     func setLyrics(_ document: LyricsDocument, track: TrackInfo) {
         let changed = document.lines != lines
         lines = document.lines
-        timing = document.wordTiming
         message = nil
         plainText = nil
         updateClock(track)
@@ -331,7 +362,7 @@ private final class LyricsCanvasView: NSView {
             displayedOffset = nil
             displayedFocus = activeIndex.map(CGFloat.init)
         }
-        activateTimer()
+        updateTimerState()
         needsDisplay = true
     }
 
@@ -342,7 +373,7 @@ private final class LyricsCanvasView: NSView {
         }
         updateClock(track)
         activeIndex = lyrics.lineIndex(at: track.position)
-        activateTimer()
+        updateTimerState()
         needsDisplay = true
     }
 
@@ -381,37 +412,43 @@ private final class LyricsCanvasView: NSView {
 
     func beginLiveResize() {
         guard !isLiveResizing else { return }
-        liveResizeSnapshot = makeSnapshot()
         isLiveResizing = true
         stopTimer()
+        invalidateGeometry()
         needsDisplay = true
     }
 
     func endLiveResize() {
         guard isLiveResizing else { return }
         isLiveResizing = false
-        liveResizeSnapshot = nil
         invalidateGeometry()
-        if !lines.isEmpty {
-            activateTimer()
-        }
+        updateTimerState()
+    }
+
+    func beginWindowMove() {
+        guard !isWindowMoving else { return }
+        isWindowMoving = true
+        stopTimer()
+    }
+
+    func endWindowMove() {
+        guard isWindowMoving else { return }
+        isWindowMoving = false
+        updateTimerState()
+    }
+
+    func setWindowVisible(_ visible: Bool) {
+        isWindowVisible = visible
+        updateTimerState()
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        if isLiveResizing, let snapshot = liveResizeSnapshot {
-            NSGraphicsContext.current?.imageInterpolation = .low
-            snapshot.draw(
-                in: bounds,
-                from: NSRect(origin: .zero, size: snapshot.size),
-                operation: .sourceOver,
-                fraction: 1,
-                respectFlipped: true,
-                hints: [.interpolation: NSImageInterpolation.low.rawValue]
-            )
-            return
-        }
+        // This view is transparent and layer-backed. Clear retained pixels so
+        // a previously sung line cannot keep the next line fully highlighted.
+        NSColor.clear.setFill()
+        dirtyRect.fill(using: .copy)
 
         if let message {
             drawMessage(message)
@@ -424,9 +461,17 @@ private final class LyricsCanvasView: NSView {
         guard !lines.isEmpty else { return }
 
         rebuildGeometryIfNeeded()
+        let now = CACurrentMediaTime()
+        let position = interpolatedPosition(at: now)
+        if let interpolatedIndex = lineIndex(at: position) {
+            activeIndex = interpolatedIndex
+        } else if let firstLine = lines.first, position < firstLine.time {
+            // During an intro, preview the first lyric in its unsung color
+            // instead of leaving the floating window empty.
+            activeIndex = 0
+        }
         guard let activeIndex, activeIndex < lineCenters.count else { return }
 
-        let now = CACurrentMediaTime()
         let delta = min(0.05, max(1.0 / 240.0, now - lastFrameTime))
         lastFrameTime = now
         let targetFocus = CGFloat(activeIndex)
@@ -442,7 +487,6 @@ private final class LyricsCanvasView: NSView {
 
         let offset = displayedOffset ?? targetOffset
         let visualFocus = displayedFocus ?? targetFocus
-        let position = interpolatedPosition(at: now)
         let width = contentWidth
 
         for index in lines.indices {
@@ -518,7 +562,7 @@ private final class LyricsCanvasView: NSView {
         )
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current?.cgContext.setAlpha(prominence)
-        if timing == .exact {
+        if !line.words.isEmpty {
             layout.drawKaraoke(at: origin, position: position)
         } else {
             layout.drawSolid(at: origin)
@@ -628,18 +672,6 @@ private final class LyricsCanvasView: NSView {
         ).height
     }
 
-    private func makeSnapshot() -> NSImage? {
-        guard bounds.width > 0,
-              bounds.height > 0,
-              let representation = bitmapImageRepForCachingDisplay(in: bounds) else {
-            return nil
-        }
-        cacheDisplay(in: bounds, to: representation)
-        let image = NSImage(size: bounds.size)
-        image.addRepresentation(representation)
-        return image
-    }
-
     private func updateClock(_ track: TrackInfo) {
         let now = CACurrentMediaTime()
         let estimated = interpolatedPosition(at: now)
@@ -657,6 +689,24 @@ private final class LyricsCanvasView: NSView {
         basePosition + (isPlaying ? max(0, now - sampledAt) : 0)
     }
 
+    private func lineIndex(at position: TimeInterval) -> Int? {
+        guard !lines.isEmpty else { return nil }
+        var lowerBound = 0
+        var upperBound = lines.count - 1
+        var result: Int?
+
+        while lowerBound <= upperBound {
+            let index = (lowerBound + upperBound) / 2
+            if lines[index].time <= position {
+                result = index
+                lowerBound = index + 1
+            } else {
+                upperBound = index - 1
+            }
+        }
+        return result
+    }
+
     private func damp(
         _ current: CGFloat?,
         toward target: CGFloat,
@@ -669,12 +719,24 @@ private final class LyricsCanvasView: NSView {
     }
 
     private func activateTimer() {
-        guard displayTimer == nil, !isLiveResizing else { return }
+        guard displayTimer == nil,
+              isPlaying,
+              isWindowVisible,
+              !isLiveResizing,
+              !isWindowMoving else { return }
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.needsDisplay = true
         }
         displayTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .default)
+    }
+
+    private func updateTimerState() {
+        if isPlaying, isWindowVisible, !isLiveResizing, !isWindowMoving, !lines.isEmpty {
+            activateTimer()
+        } else {
+            stopTimer()
+        }
     }
 
     private func stopTimer() {
@@ -779,22 +841,12 @@ private final class KaraokeLineLayout {
                 forCharacterRange: range.characterRange,
                 actualCharacterRange: nil
             )
-            let rects = lineRects(for: glyphRange)
-            let totalWidth = rects.reduce(CGFloat(0)) { $0 + $1.width }
-            var remaining = totalWidth * fraction
-
-            for rect in rects where remaining > 0 {
-                let width = min(rect.width, remaining)
-                sungClip.appendRect(
-                    NSRect(
-                        x: origin.x + rect.minX,
-                        y: origin.y + rect.minY,
-                        width: width,
-                        height: rect.height
-                    )
-                )
-                remaining -= width
-            }
+            appendClipRects(
+                for: glyphRange,
+                fraction: fraction,
+                origin: origin,
+                to: sungClip
+            )
         }
 
         guard sungClip.elementCount > 0 else { return }
@@ -802,6 +854,30 @@ private final class KaraokeLineLayout {
         sungClip.addClip()
         sungLayout.drawGlyphs(forGlyphRange: fullGlyphRange, at: origin)
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func appendClipRects(
+        for glyphRange: NSRange,
+        fraction: Double,
+        origin: NSPoint,
+        to path: NSBezierPath
+    ) {
+        let rects = lineRects(for: glyphRange)
+        let totalWidth = rects.reduce(CGFloat(0)) { $0 + $1.width }
+        var remaining = totalWidth * fraction
+
+        for rect in rects where remaining > 0 {
+            let width = min(rect.width, remaining)
+            path.appendRect(
+                NSRect(
+                    x: origin.x + rect.minX,
+                    y: origin.y + rect.minY,
+                    width: width,
+                    height: rect.height
+                )
+            )
+            remaining -= width
+        }
     }
 
     private func lineRects(for glyphRange: NSRange) -> [NSRect] {
