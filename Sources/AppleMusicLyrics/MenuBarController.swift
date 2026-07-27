@@ -18,6 +18,7 @@ final class MenuBarController: NSObject {
 
     private var lyricMenuItems: [NSMenuItem] = []
     private var plainLyricsWindow: NSWindow?
+    private var diagnosticLogWindow: NSWindow?
     private var floatingVisible = false
     private var karaokeLineID: String?
     private var karaokeLineIndex: Int?
@@ -98,6 +99,36 @@ final class MenuBarController: NSObject {
         )
         refresh.target = self
         menu.addItem(refresh)
+
+        let diagnostic = NSMenuItem(title: "Diagnostic Log", action: nil, keyEquivalent: "")
+        let diagnosticMenu = NSMenu(title: "Diagnostic Log")
+
+        let viewLog = NSMenuItem(
+            title: "View Log…",
+            action: #selector(showDiagnosticLog),
+            keyEquivalent: ""
+        )
+        viewLog.target = self
+        diagnosticMenu.addItem(viewLog)
+
+        let copyLog = NSMenuItem(
+            title: "Copy Log",
+            action: #selector(copyDiagnosticLog),
+            keyEquivalent: ""
+        )
+        copyLog.target = self
+        diagnosticMenu.addItem(copyLog)
+
+        let revealLog = NSMenuItem(
+            title: "Show in Finder",
+            action: #selector(revealDiagnosticLog),
+            keyEquivalent: ""
+        )
+        revealLog.target = self
+        diagnosticMenu.addItem(revealLog)
+
+        diagnostic.submenu = diagnosticMenu
+        menu.addItem(diagnostic)
 
         menu.addItem(.separator())
 
@@ -334,6 +365,59 @@ final class MenuBarController: NSObject {
 
     @objc private func quit() {
         onQuit?()
+    }
+
+    @objc private func showDiagnosticLog() {
+        let text = DiagnosticLogger.shared.contents()
+        if diagnosticLogWindow == nil {
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 680, height: 520))
+            scroll.hasVerticalScroller = true
+            scroll.hasHorizontalScroller = true
+            scroll.autohidesScrollers = true
+            scroll.borderType = .noBorder
+
+            let textView = NSTextView(frame: scroll.bounds)
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.isRichText = false
+            textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            textView.textContainerInset = NSSize(width: 10, height: 10)
+            textView.string = text
+            textView.autoresizingMask = [.width, .height]
+            scroll.documentView = textView
+            textView.scrollToEndOfDocument(nil)
+
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Apple Music Lyrics Diagnostic Log"
+            window.contentView = scroll
+            window.center()
+            window.isReleasedWhenClosed = false
+            diagnosticLogWindow = window
+        } else if let scroll = diagnosticLogWindow?.contentView as? NSScrollView,
+                  let textView = scroll.documentView as? NSTextView {
+            textView.string = text
+            textView.scrollToEndOfDocument(nil)
+        }
+
+        diagnosticLogWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func copyDiagnosticLog() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(DiagnosticLogger.shared.contents(), forType: .string)
+        DiagnosticLogger.shared.info("Diagnostic log copied to pasteboard")
+    }
+
+    @objc private func revealDiagnosticLog() {
+        DiagnosticLogger.shared.prepareFile()
+        NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLogger.shared.logFileURL])
     }
 
     @objc private func showPlainLyrics(_ sender: NSMenuItem) {

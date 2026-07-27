@@ -7,6 +7,7 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
     private let cacheDirectory: URL
     private let databaseURL: URL
     private let maximumCandidates = 160
+    private let logger = DiagnosticLogger.shared
 
     init(
         fileManager: FileManager = .default,
@@ -22,14 +23,29 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
 
     func lyrics(for track: TrackInfo) -> LyricsDocument {
         var best: (score: Int, song: CatalogSong)?
+        var readableCandidates = 0
+        var decodedResponses = 0
+        var songsExamined = 0
+        var decodeFailures = 0
 
-        for candidate in candidates() {
-            guard let data = candidate.data(),
-                  let response = try? JSONDecoder().decode(CatalogResponse.self, from: data) else {
+        let candidates = candidates()
+        logger.info(
+            "Lyrics lookup started; track=\(track.displayName); duration=\(Int(track.duration.rounded())); "
+                + "candidates=\(candidates.count)"
+        )
+        for candidate in candidates {
+            guard let data = candidate.data() else {
                 continue
             }
+            readableCandidates += 1
+            guard let response = try? JSONDecoder().decode(CatalogResponse.self, from: data) else {
+                decodeFailures += 1
+                continue
+            }
+            decodedResponses += 1
 
             for song in response.data {
+                songsExamined += 1
                 let score = matchScore(song.attributes, track: track)
                 guard score >= 80,
                       song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations != nil else {
@@ -44,13 +60,31 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             if best?.score ?? 0 >= 140 { break }
         }
 
-        guard let song = best?.song,
-              let rawTTML = song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations,
-              let ttml = localizedTTML(from: rawTTML),
-              let parsed = try? AppleTTMLParser.parse(ttml),
-              !parsed.lines.isEmpty else {
+        logger.info(
+            "Lyrics cache scan finished; readable=\(readableCandidates); decoded=\(decodedResponses); "
+                + "decodeFailures=\(decodeFailures); songs=\(songsExamined); bestScore=\(best?.score ?? 0)"
+        )
+        guard let song = best?.song else {
+            logger.warning("No matching cached lyrics response found")
             return .empty
         }
+        guard let rawTTML = song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations,
+              let ttml = localizedTTML(from: rawTTML) else {
+            logger.warning("Matching response has an unsupported or empty ttmlLocalizations value")
+            return .empty
+        }
+        let parsed: ParsedAppleTTML
+        do {
+            parsed = try AppleTTMLParser.parse(ttml)
+        } catch {
+            logger.error("TTML parsing failed: \(error.localizedDescription)")
+            return .empty
+        }
+        guard !parsed.lines.isEmpty else {
+            logger.warning("TTML parsed successfully but contained no lyric lines")
+            return .empty
+        }
+        logger.info("Lyrics loaded; lines=\(parsed.lines.count); wordTiming=\(parsed.wordTiming.rawValue)")
 
         return LyricsDocument(
             lines: parsed.lines,
@@ -76,7 +110,13 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             at: cacheDirectory,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles]
-        ) else { return candidates }
+        ) else {
+            logger.warning(
+                "Cache data directory is unavailable; path=\(cacheDirectory.path); "
+                    + "indexedCandidates=\(indexed.count)"
+            )
+            return candidates
+        }
 
         let recentFiles = urls
             .filter { (try? $0.resourceValues(forKeys: keys).isRegularFile) == true }
@@ -89,12 +129,21 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         for url in recentFiles where indexedPaths.insert(url).inserted {
             candidates.append(.file(url))
         }
+        let inlineCount = indexed.filter { $0.isInline }.count
+        logger.info(
+            "Cache candidates collected; indexed=\(indexed.count); inline=\(inlineCount); "
+                + "directoryFallback=\(candidates.count - indexed.count)"
+        )
         return candidates
     }
 
     private func indexedCandidates() -> [CacheCandidate] {
         guard fileManager.isReadableFile(atPath: databaseURL.path),
               fileManager.isExecutableFile(atPath: "/usr/bin/sqlite3") else {
+            logger.warning(
+                "Cache database or sqlite3 is unavailable; databaseReadable="
+                    + "\(fileManager.isReadableFile(atPath: databaseURL.path))"
+            )
             return []
         }
 
@@ -109,17 +158,25 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
 
         let process = Process()
         let output = Pipe()
+        let errorOutput = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         process.arguments = ["-readonly", databaseURL.path, query]
         process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errorOutput
 
         do {
             try process.run()
             let data = output.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            guard process.terminationStatus == 0,
-                  let raw = String(data: data, encoding: .utf8) else {
+            guard process.terminationStatus == 0 else {
+                let message = String(data: errorData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown sqlite3 error"
+                logger.error("Cache database query failed (\(process.terminationStatus)): \(message)")
+                return []
+            }
+            guard let raw = String(data: data, encoding: .utf8) else {
+                logger.error("Cache database query returned non-UTF-8 index output")
                 return []
             }
             return raw.components(separatedBy: .newlines).compactMap { row in
@@ -138,6 +195,7 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
                 return nil
             }
         } catch {
+            logger.error("Unable to run cache database query: \(error.localizedDescription)")
             return []
         }
     }
@@ -235,6 +293,11 @@ private enum CacheCandidate {
     var fileURL: URL? {
         guard case .file(let url) = self else { return nil }
         return url
+    }
+
+    var isInline: Bool {
+        guard case .inline = self else { return false }
+        return true
     }
 
     func data() -> Data? {

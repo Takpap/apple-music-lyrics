@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let floating = FloatingLyricsController()
     private let playbackMonitor = PlaybackMonitor()
     private let lyricsService = LyricsService()
+    private let logger = DiagnosticLogger.shared
 
     private var currentTrackKey: String?
     private var latestTrack: TrackInfo?
@@ -15,8 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var forceRefresh = false
     private var lastDisplayedLine: String?
     private var lastTrackKeyForUI: String?
+    private var lastLoggedPlaybackState: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        logger.startSession()
         playbackMonitor.onUpdate = { [weak self] result in
             self?.handlePlaybackUpdate(result)
         }
@@ -45,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        logger.info("Application terminating")
         playbackMonitor.stop()
     }
 
@@ -54,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch result {
         case .failure(let error):
             let message = error.localizedDescription
+            let isNewError = lastLoggedPlaybackState != "error"
+            logPlaybackState("error")
+            if isNewError {
+                logger.error("Music AppleScript request failed: \(message)")
+            }
             if message.localizedCaseInsensitiveContains("not allowed")
                 || message.localizedCaseInsensitiveContains("(-1743)")
                 || message.localizedCaseInsensitiveContains("authorization") {
@@ -63,16 +72,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         case .track(let track):
+            logPlaybackState("track available")
             latestTrack = track
             handle(track: track)
 
         case .stopped:
+            logPlaybackState("playback stopped")
             latestTrack = nil
             currentTrackKey = nil
             currentLyrics = .empty
             apply(.stopped)
 
         case .musicNotRunning:
+            logPlaybackState("Music.app not running")
             latestTrack = nil
             currentTrackKey = nil
             currentLyrics = .empty
@@ -85,6 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let trackChanged = currentTrackKey != key
 
         if trackChanged || forceRefresh {
+            logger.info(
+                "Lyrics lookup triggered; reason=\(trackChanged ? "track changed" : "manual refresh"); "
+                    + "track=\(track.displayName); duration=\(Int(track.duration.rounded()))"
+            )
             currentTrackKey = key
             currentLyrics = .empty
             forceRefresh = false
@@ -137,11 +153,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func forceRefreshLyrics() {
+        logger.info("Manual lyrics refresh requested")
         currentTrackKey = nil
         lastDisplayedLine = nil
         lastTrackKeyForUI = nil
         forceRefresh = true
         playbackMonitor.sampleNow()
+    }
+
+    private func logPlaybackState(_ state: String) {
+        guard lastLoggedPlaybackState != state else { return }
+        lastLoggedPlaybackState = state
+        logger.info("Playback state: \(state)")
     }
 
     private func apply(_ status: AppStatus) {

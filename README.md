@@ -182,10 +182,26 @@ or upgraded.
 | --- | --- |
 | Show / Hide Floating Lyrics | Toggle the floating panel (`Command-L` while the menu is focused) |
 | Refresh Lyrics | Rescan Music.app's local lyrics cache |
+| Diagnostic Log | View, copy, or reveal the local diagnostic log in Finder |
 | Quit Apple Music Lyrics | Exit the app |
 
 The floating panel's position, size, and visibility are remembered between
 launches.
+
+## Diagnostic Log
+
+The app records local diagnostics for the lyrics cache and parsing pipeline at:
+
+```text
+~/Library/Logs/Apple Music Lyrics/diagnostic.log
+```
+
+At 512 KB, the existing log is rotated to `diagnostic.previous.log`. The log
+includes the app and macOS versions, cache candidate counts, parsing results,
+and current song and artist metadata needed for troubleshooting. It never
+includes lyrics text. Use **Diagnostic Log** in the menu to view and screenshot
+the log, copy it, or reveal the file in Finder. Users should review the contents
+before sharing and may remove any metadata they do not want to disclose.
 
 ## Testing
 
@@ -220,6 +236,7 @@ Sources/AppleMusicLyrics/
   LyricsService.swift                   Apple-only lyrics service
   Models.swift                          Shared data models
   AppPreferences.swift                  UserDefaults preferences
+  DiagnosticLogger.swift               Bounded local troubleshooting log
   AppleScriptRunner.swift               AppleScript execution helper
 
 Tests/AppleMusicLyricsTests/             Unit and opt-in integration tests

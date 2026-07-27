@@ -172,9 +172,23 @@ open "/Applications/Apple Music Lyrics.app"
 | --- | --- |
 | Show / Hide Floating Lyrics | 显示或隐藏浮动歌词面板（菜单聚焦时可按 `Command-L`） |
 | Refresh Lyrics | 重新扫描 Music.app 的本地歌词缓存 |
+| Diagnostic Log | 查看、复制诊断日志，或在 Finder 中显示日志文件 |
 | Quit Apple Music Lyrics | 退出应用 |
 
 浮动面板的位置、尺寸和显示状态会在下次启动时恢复。
+
+## 诊断日志
+
+应用会在本地记录歌词缓存读取和解析过程：
+
+```text
+~/Library/Logs/Apple Music Lyrics/diagnostic.log
+```
+
+当日志达到 512 KB 时，旧内容会轮转到 `diagnostic.previous.log`。日志包含应用与
+macOS 版本、缓存候选数量、解析结果、当前歌曲名和歌手等排查信息，但不会记录
+歌词正文。用户可以从菜单中的 **Diagnostic Log** 查看日志并截图、复制日志，
+或在 Finder 中找到文件后发送。分享前可以先查看内容并删除不希望公开的信息。
 
 ## 测试
 
@@ -209,6 +223,7 @@ Sources/AppleMusicLyrics/
   LyricsService.swift                   仅使用 Apple 数据的歌词服务
   Models.swift                          公共数据模型
   AppPreferences.swift                  UserDefaults 设置
+  DiagnosticLogger.swift               有大小上限的本地诊断日志
   AppleScriptRunner.swift               AppleScript 执行工具
 
 Tests/AppleMusicLyricsTests/             单元测试和可选集成测试
