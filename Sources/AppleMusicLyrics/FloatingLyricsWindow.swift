@@ -84,6 +84,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
         backdropView.blendingMode = .behindWindow
         backdropView.state = .active
         effect.addSubview(backdropView)
+#if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView(frame: effect.bounds)
             glass.autoresizingMask = [.width, .height]
@@ -92,6 +93,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
             effect.addSubview(glass)
             glassBackdropView = glass
         }
+#endif
 
         contrastOverlay.frame = effect.bounds
         contrastOverlay.autoresizingMask = [.width, .height]
@@ -307,6 +309,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
             .withAlphaComponent(overlayAlpha)
             .cgColor
         contrastOverlay.isHidden = locked
+#if compiler(>=6.2)
         if #available(macOS 26.0, *),
            let glass = glassBackdropView as? NSGlassEffectView {
             backdropView.isHidden = true
@@ -321,6 +324,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
             glass.alphaValue = CGFloat(AppPreferences.floatingLyricsOpacity)
             glass.isHidden = locked
         }
+#endif
     }
 
     private func applySpacePreferences() {
