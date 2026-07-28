@@ -1084,7 +1084,7 @@ private final class KaraokeStatusTitleView: NSView {
             self?.needsDisplay = true
         }
         displayTimer = timer
-        RunLoop.main.add(timer, forMode: .default)
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func stopTimer() {

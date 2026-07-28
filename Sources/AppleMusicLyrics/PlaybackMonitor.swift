@@ -46,9 +46,10 @@ final class PlaybackMonitor {
         timer.tolerance = 0.04
         self.timer = timer
 
-        // Window dragging and resizing use an event-tracking run loop mode.
-        // Pausing synchronous Apple Events there keeps interaction responsive.
-        RunLoop.main.add(timer, forMode: .default)
+        // Menu tracking switches the main run loop out of its default mode.
+        // Sampling through the helper is asynchronous, so keep it active while
+        // the status menu is open to update its playback controls and lyrics.
+        RunLoop.main.add(timer, forMode: .common)
         sampleNow()
     }
 
