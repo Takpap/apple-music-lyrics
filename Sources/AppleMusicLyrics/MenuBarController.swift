@@ -26,8 +26,6 @@ final class MenuBarController: NSObject {
 
     private var diagnosticLogWindow: NSWindow?
     private var floatingVisible = false
-    private var karaokeLineID: String?
-    private var karaokeLineIndex: Int?
 
     var onRefreshLyrics: (() -> Void)?
     var onToggleFloating: (() -> Void)?
@@ -66,7 +64,7 @@ final class MenuBarController: NSObject {
         updatePlaybackProgress(track: track)
         guard let index = lyrics.lineIndex(at: track.position),
               index < lyrics.lines.count else { return }
-        setKaraokeTitle(line: lyrics.lines[index], index: index, track: track)
+        setKaraokeTitle(line: lyrics.lines[index], track: track)
     }
 
     func setFloatingVisible(_ visible: Bool) {
@@ -205,28 +203,14 @@ final class MenuBarController: NSObject {
     // MARK: - Helpers
 
     private func setTitle(_ title: String) {
-        karaokeLineID = nil
-        karaokeLineIndex = nil
         karaokeTitleView.deactivate()
         karaokeTitleView.isHidden = true
         statusItem.length = NSStatusItem.variableLength
         statusItem.button?.title = title
     }
 
-    private func setKaraokeTitle(line: LyricLine, index: Int, track: TrackInfo) {
+    private func setKaraokeTitle(line: LyricLine, track: TrackInfo) {
         guard let button = statusItem.button else { return }
-
-        let lineChanged = karaokeLineID != nil && karaokeLineID != line.id
-        if lineChanged, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let transition = CATransition()
-            transition.type = .push
-            if let previous = karaokeLineIndex {
-                transition.subtype = index >= previous ? .fromBottom : .fromTop
-            }
-            transition.duration = 0.24
-            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            button.layer?.add(transition, forKey: "lyrics.lineTransition")
-        }
 
         let displayText = karaokeTitleView.update(line: line, track: track, limit: 120)
         let screen = button.window?.screen ?? NSScreen.main
@@ -241,7 +225,9 @@ final class MenuBarController: NSObject {
         } else {
             maximumWidth = 260
         }
-        statusItem.length = karaokeTitleView.preferredWidth(maximum: maximumWidth)
+        // A stable width keeps the entire status item from jumping whenever
+        // consecutive lyric lines have noticeably different lengths.
+        statusItem.length = maximumWidth
         if button.attributedTitle.string != displayText {
             button.attributedTitle = NSAttributedString(
                 string: displayText,
@@ -253,8 +239,6 @@ final class MenuBarController: NSObject {
         }
         karaokeTitleView.isHidden = false
         karaokeTitleView.needsDisplay = true
-        karaokeLineID = line.id
-        karaokeLineIndex = index
     }
 
     private func truncate(_ text: String, limit: Int = 48) -> String {
@@ -641,14 +625,32 @@ private final class MenuPlayerView: NSView {
 // MARK: - Smooth menu bar karaoke
 
 private final class KaraokeStatusTitleView: NSView {
-    private struct Segment {
-        let range: NSRange
+    private struct TimedGlyph {
         let start: TimeInterval
         let end: TimeInterval
         let offset: CGFloat
         let width: CGFloat
     }
 
+    private struct Segment {
+        let range: NSRange
+        let start: TimeInterval
+        let end: TimeInterval
+        let offset: CGFloat
+        let width: CGFloat
+        let glyphs: [TimedGlyph]
+    }
+
+    private struct PreviousLine {
+        let text: String
+        let segments: [Segment]
+        let prefixLength: Int
+        let prefixWidth: CGFloat
+        let originX: CGFloat
+        let startedAt: CFTimeInterval
+    }
+
+    private static let lineTransitionDuration: CFTimeInterval = 0.33
     private let font = NSFont.menuBarFont(ofSize: 13)
     private var displayText = ""
     private var segments: [Segment] = []
@@ -661,6 +663,7 @@ private final class KaraokeStatusTitleView: NSView {
     private var renderedOriginX: CGFloat?
     private var lastDrawTime: CFTimeInterval = 0
     private var prefixWidth: CGFloat = 0
+    private var previousLine: PreviousLine?
 
     override var isFlipped: Bool { true }
 
@@ -674,12 +677,32 @@ private final class KaraokeStatusTitleView: NSView {
 
     func update(line: LyricLine, track: TrackInfo, limit: Int) -> String {
         let now = CACurrentMediaTime()
+        let estimated = interpolatedPosition(at: now)
         if currentLineID != line.id {
+            if currentLineID != nil,
+               !displayText.isEmpty,
+               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                let textWidth = measuredWidth(of: displayText)
+                previousLine = PreviousLine(
+                    text: displayText,
+                    segments: segments,
+                    prefixLength: prefixLength,
+                    prefixWidth: prefixWidth,
+                    originX: renderedOriginX ?? horizontalOrigin(
+                        textWidth: textWidth,
+                        position: estimated,
+                        segments: segments,
+                        prefixWidth: prefixWidth
+                    ),
+                    startedAt: now
+                )
+            } else {
+                previousLine = nil
+            }
             currentLineID = line.id
             renderedOriginX = nil
             lastDrawTime = now
         }
-        let estimated = interpolatedPosition(at: now)
         let error = track.position - estimated
         if isPlaying, abs(error) < 0.75 {
             // Small sample corrections should not become visible motion.
@@ -691,7 +714,7 @@ private final class KaraokeStatusTitleView: NSView {
         isPlaying = track.state == .playing
 
         rebuildDisplay(line: line, paused: track.state == .paused, limit: limit)
-        if isPlaying {
+        if isPlaying || previousLine != nil {
             activateTimer()
         } else {
             stopTimer()
@@ -706,66 +729,160 @@ private final class KaraokeStatusTitleView: NSView {
         segments = []
         currentLineID = nil
         renderedOriginX = nil
-    }
-
-    func preferredWidth(maximum: CGFloat) -> CGFloat {
-        let attributes: [NSAttributedString.Key: Any] = [.font: font]
-        let textWidth = ceil((displayText as NSString).size(withAttributes: attributes).width)
-        return min(maximum, max(28, textWidth + 16))
+        previousLine = nil
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard !displayText.isEmpty else { return }
 
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byClipping
-        let upcomingAttributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.42),
-            .paragraphStyle: paragraph
-        ]
-        let sungAttributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.96),
-            .paragraphStyle: paragraph
-        ]
-        let upcoming = NSAttributedString(string: displayText, attributes: upcomingAttributes)
-        let sung = NSAttributedString(string: displayText, attributes: sungAttributes)
-        let textSize = upcoming.size()
+        let textSize = NSSize(
+            width: measuredWidth(of: displayText),
+            height: measuredHeight(of: displayText)
+        )
         let now = CACurrentMediaTime()
         let position = interpolatedPosition(at: now)
         let targetOriginX = horizontalOrigin(
             textWidth: textSize.width,
-            position: position
+            position: position,
+            segments: segments,
+            prefixWidth: prefixWidth
         )
         let origin = NSPoint(
             x: smoothedOrigin(target: targetOriginX, at: now),
             y: floor((bounds.height - textSize.height) / 2)
         )
-        upcoming.draw(at: origin)
+
+        if let previousLine {
+            let elapsed = now - previousLine.startedAt
+            let linearProgress = min(1, max(0, elapsed / Self.lineTransitionDuration))
+            let progress = linearProgress * linearProgress * (3 - 2 * linearProgress)
+            drawLine(
+                text: previousLine.text,
+                segments: previousLine.segments,
+                prefixLength: previousLine.prefixLength,
+                prefixWidth: previousLine.prefixWidth,
+                position: position,
+                origin: NSPoint(
+                    x: previousLine.originX,
+                    y: floor((bounds.height - measuredHeight(of: previousLine.text)) / 2)
+                ),
+                alpha: 1 - progress
+            )
+            drawLine(
+                text: displayText,
+                segments: segments,
+                prefixLength: prefixLength,
+                prefixWidth: prefixWidth,
+                position: position,
+                origin: origin,
+                alpha: progress
+            )
+            if linearProgress >= 1 {
+                self.previousLine = nil
+                if !isPlaying {
+                    stopTimer()
+                }
+            }
+        } else {
+            drawLine(
+                text: displayText,
+                segments: segments,
+                prefixLength: prefixLength,
+                prefixWidth: prefixWidth,
+                position: position,
+                origin: origin,
+                alpha: 1
+            )
+        }
+    }
+
+    private func drawLine(
+        text: String,
+        segments: [Segment],
+        prefixLength: Int,
+        prefixWidth: CGFloat,
+        position: TimeInterval,
+        origin: NSPoint,
+        alpha: CGFloat
+    ) {
+        guard alpha > 0 else { return }
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byClipping
+        let upcoming = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.42),
+                .paragraphStyle: paragraph
+            ]
+        )
+        let sung = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.96),
+                .paragraphStyle: paragraph
+            ]
+        )
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.cgContext.setAlpha(alpha)
+        let timedGlyphs = segments.flatMap(\.glyphs)
+        guard !timedGlyphs.isEmpty else {
+            upcoming.draw(at: origin)
+            NSGraphicsContext.restoreGraphicsState()
+            return
+        }
 
         if prefixLength > 0 {
-            draw(
-                attributed: sung,
-                offset: 0,
-                width: prefixWidth,
-                fraction: 1,
-                at: origin
-            )
+            draw(attributed: upcoming, offset: 0, width: prefixWidth, fraction: 1, at: origin)
+            draw(attributed: sung, offset: 0, width: prefixWidth, fraction: 1, at: origin)
         }
         for segment in segments {
-            let duration = max(0.01, segment.end - segment.start)
-            let fraction = min(1, max(0, (position - segment.start) / duration))
-            guard fraction > 0 else { continue }
-            draw(
-                attributed: sung,
-                offset: segment.offset,
-                width: segment.width,
-                fraction: fraction,
-                at: origin
-            )
+            if segment.glyphs.isEmpty {
+                let duration = max(0.01, segment.end - segment.start)
+                let fraction = min(1, max(0, (position - segment.start) / duration))
+                draw(
+                    attributed: upcoming,
+                    offset: segment.offset,
+                    width: segment.width,
+                    fraction: 1,
+                    at: origin
+                )
+                guard fraction > 0 else { continue }
+                draw(
+                    attributed: sung,
+                    offset: segment.offset,
+                    width: segment.width,
+                    fraction: fraction,
+                    at: origin
+                )
+                continue
+            }
+
+            for glyph in segment.glyphs {
+                let duration = max(0.01, glyph.end - glyph.start)
+                let fraction = min(1, max(0, (position - glyph.start) / duration))
+                draw(
+                    attributed: upcoming,
+                    offset: glyph.offset,
+                    width: glyph.width,
+                    fraction: 1,
+                    at: origin
+                )
+                guard fraction > 0 else { continue }
+                draw(
+                    attributed: sung,
+                    offset: glyph.offset,
+                    width: glyph.width,
+                    fraction: fraction,
+                    at: origin
+                )
+            }
         }
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func draw(
@@ -792,7 +909,9 @@ private final class KaraokeStatusTitleView: NSView {
 
     private func horizontalOrigin(
         textWidth: CGFloat,
-        position: TimeInterval
+        position: TimeInterval,
+        segments: [Segment],
+        prefixWidth: CGFloat
     ) -> CGFloat {
         let padding: CGFloat = 7
         guard textWidth > bounds.width - padding * 2 else {
@@ -816,6 +935,14 @@ private final class KaraokeStatusTitleView: NSView {
         let desired = bounds.width * 0.56 - cursor
         let minimum = bounds.width - padding - textWidth
         return floor(min(padding, max(minimum, desired)))
+    }
+
+    private func measuredWidth(of text: String) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    private func measuredHeight(of text: String) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: font]).height
     }
 
     private func smoothedOrigin(target: CGFloat, at now: CFTimeInterval) -> CGFloat {
@@ -856,7 +983,8 @@ private final class KaraokeStatusTitleView: NSView {
                     start: word.start,
                     end: word.start + (word.end - word.start) * consumedFraction,
                     offset: 0,
-                    width: 0
+                    width: 0,
+                    glyphs: []
                 )
             )
             remaining -= take
@@ -888,12 +1016,21 @@ private final class KaraokeStatusTitleView: NSView {
         )
         segments = rebuilt.map { segment in
             let prefixRange = NSRange(location: 0, length: segment.range.location)
+            let offset = metrics.attributedSubstring(from: prefixRange).size().width
+            let width = metrics.attributedSubstring(from: segment.range).size().width
             return Segment(
                 range: segment.range,
                 start: segment.start,
                 end: segment.end,
-                offset: metrics.attributedSubstring(from: prefixRange).size().width,
-                width: metrics.attributedSubstring(from: segment.range).size().width
+                offset: offset,
+                width: width,
+                glyphs: timedGlyphs(
+                    in: segment.range,
+                    metrics: metrics,
+                    start: segment.start,
+                    end: segment.end,
+                    totalWidth: width
+                )
             )
         }
         prefixLength = (prefix as NSString).length
@@ -904,8 +1041,45 @@ private final class KaraokeStatusTitleView: NSView {
             : 0
     }
 
+    private func timedGlyphs(
+        in range: NSRange,
+        metrics: NSAttributedString,
+        start: TimeInterval,
+        end: TimeInterval,
+        totalWidth: CGFloat
+    ) -> [TimedGlyph] {
+        guard totalWidth > 0,
+              let stringRange = Range(range, in: displayText) else { return [] }
+
+        var ranges: [NSRange] = []
+        displayText.enumerateSubstrings(
+            in: stringRange,
+            options: .byComposedCharacterSequences
+        ) { _, substringRange, _, _ in
+            ranges.append(NSRange(substringRange, in: self.displayText))
+        }
+
+        let duration = max(0.01, end - start)
+        var consumedWidth: CGFloat = 0
+        return ranges.compactMap { glyphRange in
+            let width = metrics.attributedSubstring(from: glyphRange).size().width
+            guard width > 0 else { return nil }
+            let prefixRange = NSRange(location: 0, length: glyphRange.location)
+            let offset = metrics.attributedSubstring(from: prefixRange).size().width
+            let glyphStart = start + duration * TimeInterval(consumedWidth / totalWidth)
+            consumedWidth += width
+            let glyphEnd = start + duration * TimeInterval(consumedWidth / totalWidth)
+            return TimedGlyph(
+                start: glyphStart,
+                end: glyphEnd,
+                offset: offset,
+                width: width
+            )
+        }
+    }
+
     private func activateTimer() {
-        guard displayTimer == nil, isPlaying else { return }
+        guard displayTimer == nil, isPlaying || previousLine != nil else { return }
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.needsDisplay = true
         }
