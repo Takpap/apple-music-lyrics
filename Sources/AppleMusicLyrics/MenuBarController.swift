@@ -5,29 +5,25 @@ final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private let karaokeTitleView = KaraokeStatusTitleView()
+    private let playerItem = NSMenuItem()
+    private let playerView = MenuPlayerView()
 
-    private let trackItem = NSMenuItem(title: "No track", action: nil, keyEquivalent: "")
-    private let stateItem = NSMenuItem(title: "Status: Idle", action: nil, keyEquivalent: "")
-    private let sourceItem = NSMenuItem(title: "Source: —", action: nil, keyEquivalent: "")
-    private let lyricsHeader = NSMenuItem(title: "Lyrics", action: nil, keyEquivalent: "")
     private let floatingItem = NSMenuItem(
-        title: "Show Floating Lyrics",
+        title: "浮动歌词",
         action: #selector(toggleFloating),
         keyEquivalent: "l"
     )
     private let lockFloatingItem = NSMenuItem(
-        title: "Lock Floating Lyrics",
+        title: "锁定浮动歌词",
         action: #selector(toggleFloatingLock),
         keyEquivalent: "k"
     )
     private let clickThroughItem = NSMenuItem(
-        title: "Click Through Floating Lyrics",
+        title: "鼠标穿透浮动歌词",
         action: #selector(toggleFloatingClickThrough),
         keyEquivalent: ""
     )
 
-    private var lyricMenuItems: [NSMenuItem] = []
-    private var plainLyricsWindow: NSWindow?
     private var diagnosticLogWindow: NSWindow?
     private var floatingVisible = false
     private var karaokeLineID: String?
@@ -37,6 +33,10 @@ final class MenuBarController: NSObject {
     var onToggleFloating: (() -> Void)?
     var onToggleFloatingLock: (() -> Void)?
     var onToggleFloatingClickThrough: (() -> Void)?
+    var onSeek: ((TimeInterval) -> Void)?
+    var onPreviousTrack: (() -> Void)?
+    var onTogglePlayPause: (() -> Void)?
+    var onNextTrack: (() -> Void)?
     var onQuit: (() -> Void)?
 
     override init() {
@@ -47,14 +47,18 @@ final class MenuBarController: NSObject {
         lockFloatingItem.target = self
         lockFloatingItem.keyEquivalentModifierMask = [.control, .option]
         clickThroughItem.target = self
+        playerItem.view = playerView
+        playerView.onSeek = { [weak self] position in self?.onSeek?(position) }
+        playerView.onPreviousTrack = { [weak self] in self?.onPreviousTrack?() }
+        playerView.onTogglePlayPause = { [weak self] in self?.onTogglePlayPause?() }
+        playerView.onNextTrack = { [weak self] in self?.onNextTrack?() }
         configureStatusItem()
         rebuildMenu()
     }
 
     /// Lightweight update for playback time without rebuilding the lyrics menu.
     func updatePlaybackProgress(track: TrackInfo) {
-        stateItem.title =
-            "Status: \(track.state.rawValue.capitalized) · \(formatTime(track.position)) / \(formatTime(track.duration))"
+        playerView.update(track: track)
     }
 
     /// Repaints the status bar title without rebuilding the menu.
@@ -67,12 +71,10 @@ final class MenuBarController: NSObject {
 
     func setFloatingVisible(_ visible: Bool) {
         floatingVisible = visible
-        floatingItem.title = visible ? "Hide Floating Lyrics" : "Show Floating Lyrics"
         floatingItem.state = visible ? .on : .off
     }
 
     func setFloatingInteraction(locked: Bool, clickThrough: Bool) {
-        lockFloatingItem.title = locked ? "Unlock Floating Lyrics" : "Lock Floating Lyrics"
         lockFloatingItem.state = locked ? .on : .off
         clickThroughItem.state = clickThrough ? .on : .off
     }
@@ -95,21 +97,7 @@ final class MenuBarController: NSObject {
     private func rebuildMenu() {
         menu.removeAllItems()
 
-        trackItem.isEnabled = false
-        stateItem.isEnabled = false
-        sourceItem.isEnabled = false
-        lyricsHeader.isEnabled = false
-
-        menu.addItem(trackItem)
-        menu.addItem(stateItem)
-        menu.addItem(sourceItem)
-        menu.addItem(.separator())
-
-        menu.addItem(lyricsHeader)
-        for item in lyricMenuItems {
-            menu.addItem(item)
-        }
-
+        menu.addItem(playerItem)
         menu.addItem(.separator())
 
         menu.addItem(floatingItem)
@@ -117,18 +105,18 @@ final class MenuBarController: NSObject {
         menu.addItem(clickThroughItem)
 
         let refresh = NSMenuItem(
-            title: "Refresh Lyrics",
+            title: "刷新歌词",
             action: #selector(refreshLyrics),
             keyEquivalent: "r"
         )
         refresh.target = self
         menu.addItem(refresh)
 
-        let diagnostic = NSMenuItem(title: "Diagnostic Log", action: nil, keyEquivalent: "")
-        let diagnosticMenu = NSMenu(title: "Diagnostic Log")
+        let diagnostic = NSMenuItem(title: "诊断日志", action: nil, keyEquivalent: "")
+        let diagnosticMenu = NSMenu(title: "诊断日志")
 
         let viewLog = NSMenuItem(
-            title: "View Log…",
+            title: "查看日志…",
             action: #selector(showDiagnosticLog),
             keyEquivalent: ""
         )
@@ -136,7 +124,7 @@ final class MenuBarController: NSObject {
         diagnosticMenu.addItem(viewLog)
 
         let copyLog = NSMenuItem(
-            title: "Copy Log",
+            title: "复制日志",
             action: #selector(copyDiagnosticLog),
             keyEquivalent: ""
         )
@@ -144,7 +132,7 @@ final class MenuBarController: NSObject {
         diagnosticMenu.addItem(copyLog)
 
         let revealLog = NSMenuItem(
-            title: "Show in Finder",
+            title: "在访达中显示",
             action: #selector(revealDiagnosticLog),
             keyEquivalent: ""
         )
@@ -157,7 +145,7 @@ final class MenuBarController: NSObject {
         menu.addItem(.separator())
 
         let quit = NSMenuItem(
-            title: "Quit Apple Music Lyrics",
+            title: "退出 Apple Music Lyrics",
             action: #selector(quit),
             keyEquivalent: "q"
         )
@@ -179,33 +167,22 @@ final class MenuBarController: NSObject {
         switch status {
         case .idle:
             setTitle("♪")
-            trackItem.title = "No track"
-            stateItem.title = "Status: Idle"
-            sourceItem.title = "Source: —"
-            setLyricPreview(lines: [], highlightIndex: nil, plainFallback: nil)
+            playerView.update(track: nil, message: "未播放歌曲")
 
         case .musicNotRunning:
             setTitle("♪ Music")
-            trackItem.title = "Music is not running"
-            stateItem.title = "Status: Waiting for Music.app"
-            sourceItem.title = "Source: —"
-            setLyricPreview(lines: [], highlightIndex: nil, plainFallback: nil)
+            playerView.update(track: nil, message: "打开“音乐”并开始播放")
 
         case .stopped:
-            setTitle("♪ Stopped")
-            trackItem.title = "Playback stopped"
-            stateItem.title = "Status: Stopped"
-            sourceItem.title = "Source: —"
-            setLyricPreview(lines: [], highlightIndex: nil, plainFallback: nil)
+            setTitle("♪ 已停止")
+            playerView.update(track: nil, message: "播放已停止")
 
         case .loadingLyrics(let track):
             setTitle(truncate("… \(track.title)"))
-            trackItem.title = track.displayName
-            stateItem.title = "Status: Loading lyrics…"
-            sourceItem.title = "Source: Apple Music cache"
-            setLyricPreview(lines: [], highlightIndex: nil, plainFallback: nil)
+            playerView.update(track: track)
 
         case .showing(let track, let lyrics, let currentLine):
+            playerView.update(track: track, artworkURL: lyrics.artworkURL)
             if lyrics.isSynced, lyrics.lineIndex(at: track.position) != nil {
                 updateKaraokeProgress(track: track, lyrics: lyrics)
             } else {
@@ -213,107 +190,16 @@ final class MenuBarController: NSObject {
                 let display = currentLine.isEmpty ? track.displayName : currentLine
                 setTitle(truncate(prefix + display))
             }
-            trackItem.title = track.displayName
-            stateItem.title = "Status: \(track.state.rawValue.capitalized) · \(formatTime(track.position)) / \(formatTime(track.duration))"
-            let karaoke: String
-            switch lyrics.wordTiming {
-            case .exact: karaoke = " · 逐字"
-            case .estimated: karaoke = " · 逐字≈"
-            case .none: karaoke = ""
-            }
-            sourceItem.title = "Source: \(lyrics.source)"
-                + (lyrics.isSynced ? " (synced)" : " (plain)")
-                + karaoke
-            let highlight = lyrics.lineIndex(at: track.position)
-            setLyricPreview(lines: lyrics.lines, highlightIndex: highlight, plainFallback: lyrics.plainText)
 
         case .noLyrics(let track):
             let prefix = track.state == .paused ? "⏸ " : "♪ "
             setTitle(truncate(prefix + track.displayName))
-            trackItem.title = track.displayName
-            stateItem.title = "Status: \(track.state.rawValue.capitalized) · no lyrics"
-            sourceItem.title = "Source: —"
-            setLyricPreview(lines: [], highlightIndex: nil, plainFallback: "No lyrics found for this track.")
+            playerView.update(track: track)
 
         case .error(let message):
             setTitle("♪ Error")
-            trackItem.title = "Error"
-            stateItem.title = message
-            sourceItem.title = "Source: —"
-            setLyricPreview(lines: [], highlightIndex: nil, plainFallback: message)
+            playerView.update(track: nil, message: message)
         }
-    }
-
-    // MARK: - Menu lyrics preview
-
-    private func setLyricPreview(lines: [LyricLine], highlightIndex: Int?, plainFallback: String?) {
-        lyricMenuItems.removeAll()
-
-        if lines.isEmpty {
-            if let plainFallback, !plainFallback.isEmpty {
-                let preview = plainFallback
-                    .components(separatedBy: .newlines)
-                    .prefix(12)
-                    .joined(separator: "\n")
-                let item = NSMenuItem(
-                    title: truncate(preview.replacingOccurrences(of: "\n", with: " / "), limit: 80),
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                item.isEnabled = false
-                lyricMenuItems.append(item)
-
-                let open = NSMenuItem(
-                    title: "Show Full Plain Lyrics…",
-                    action: #selector(showPlainLyrics),
-                    keyEquivalent: ""
-                )
-                open.target = self
-                open.representedObject = plainFallback
-                lyricMenuItems.append(open)
-            } else {
-                let item = NSMenuItem(title: "(no lyrics)", action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                lyricMenuItems.append(item)
-            }
-        } else {
-            let window = 7
-            let center = highlightIndex ?? 0
-            let start = max(0, center - window / 2)
-            let end = min(lines.count, start + window)
-            let adjustedStart = max(0, end - window)
-
-            for index in adjustedStart..<end {
-                let line = lines[index]
-                let mark = (index == highlightIndex) ? "▶ " : "   "
-                let text = line.text.isEmpty ? "·" : line.text
-                let title = "\(mark)\(formatTime(line.time))  \(text)"
-                let item = NSMenuItem(title: truncate(title, limit: 90), action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                if index == highlightIndex {
-                    item.attributedTitle = NSAttributedString(
-                        string: truncate(title, limit: 90),
-                        attributes: [
-                            .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize),
-                            .foregroundColor: NSColor.labelColor
-                        ]
-                    )
-                }
-                lyricMenuItems.append(item)
-            }
-
-            if lines.count > window {
-                let more = NSMenuItem(
-                    title: "… \(lines.count) lines total",
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                more.isEnabled = false
-                lyricMenuItems.append(more)
-            }
-        }
-
-        rebuildMenu()
     }
 
     // MARK: - Helpers
@@ -378,13 +264,6 @@ final class MenuBarController: NSObject {
         return String(trimmed[..<end]) + "…"
     }
 
-    private func formatTime(_ time: TimeInterval) -> String {
-        let total = max(0, Int(time.rounded(.down)))
-        let m = total / 60
-        let s = total % 60
-        return String(format: "%d:%02d", m, s)
-    }
-
     // MARK: - Actions
 
     @objc private func refreshLyrics() {
@@ -425,7 +304,7 @@ final class MenuBarController: NSObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Apple Music Lyrics Diagnostic Log"
+            window.title = "Apple Music Lyrics 诊断日志"
             window.contentView = scroll
             window.center()
             window.isReleasedWhenClosed = false
@@ -452,41 +331,310 @@ final class MenuBarController: NSObject {
         NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLogger.shared.logFileURL])
     }
 
-    @objc private func showPlainLyrics(_ sender: NSMenuItem) {
-        guard let text = sender.representedObject as? String else { return }
+}
 
-        if plainLyricsWindow == nil {
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 520))
-            scroll.hasVerticalScroller = true
-            scroll.borderType = .noBorder
-            scroll.drawsBackground = true
+// MARK: - Menu player
 
-            let textView = NSTextView(frame: scroll.bounds)
-            textView.isEditable = false
-            textView.isSelectable = true
-            textView.font = NSFont.systemFont(ofSize: 14)
-            textView.string = text
-            textView.autoresizingMask = [.width, .height]
-            scroll.documentView = textView
+private final class CompactSliderCell: NSSliderCell {
+    override var knobThickness: CGFloat { 10 }
 
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
-                styleMask: [.titled, .closable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "Lyrics"
-            window.contentView = scroll
-            window.center()
-            window.isReleasedWhenClosed = false
-            plainLyricsWindow = window
-        } else if let scroll = plainLyricsWindow?.contentView as? NSScrollView,
-                  let textView = scroll.documentView as? NSTextView {
-            textView.string = text
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        let track = NSRect(x: rect.minX, y: rect.midY - 1.5, width: rect.width, height: 3)
+        NSColor.separatorColor.withAlphaComponent(0.55).setFill()
+        NSBezierPath(roundedRect: track, xRadius: 1.5, yRadius: 1.5).fill()
+
+        let range = maxValue - minValue
+        let fraction = range > 0 ? CGFloat((doubleValue - minValue) / range) : 0
+        guard fraction > 0 else { return }
+        var filled = track
+        filled.size.width = max(track.height, track.width * min(1, max(0, fraction)))
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: filled, xRadius: 1.5, yRadius: 1.5).fill()
+    }
+
+    override func drawKnob(_ knobRect: NSRect) {
+        let diameter: CGFloat = 10
+        let compactRect = NSRect(
+            x: knobRect.midX - diameter / 2,
+            y: knobRect.midY - diameter / 2,
+            width: diameter,
+            height: diameter
+        )
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(ovalIn: compactRect).fill()
+    }
+}
+
+private final class MenuPlayerView: NSView {
+    private let artworkView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "Apple Music Lyrics")
+    private let subtitleLabel = NSTextField(labelWithString: "未播放歌曲")
+    private let previousButton = NSButton()
+    private let playPauseButton = NSButton()
+    private let nextButton = NSButton()
+    private let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let elapsedLabel = NSTextField(labelWithString: "0:00")
+    private let remainingLabel = NSTextField(labelWithString: "-0:00")
+
+    private var displayedTrackKey: String?
+    private var displayedArtworkURL: URL?
+    private var artworkTask: URLSessionDataTask?
+
+    var onSeek: ((TimeInterval) -> Void)?
+    var onPreviousTrack: (() -> Void)?
+    var onTogglePlayPause: (() -> Void)?
+    var onNextTrack: (() -> Void)?
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 410, height: 150)
+    }
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 410, height: 150))
+        configure()
+        update(track: nil, message: "未播放歌曲")
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    deinit {
+        artworkTask?.cancel()
+    }
+
+    private func configure() {
+        artworkView.translatesAutoresizingMaskIntoConstraints = false
+        artworkView.wantsLayer = true
+        artworkView.layer?.cornerRadius = 8
+        artworkView.layer?.masksToBounds = true
+        artworkView.imageScaling = .scaleProportionallyUpOrDown
+        setArtworkPlaceholder()
+
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        subtitleLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        configureButton(
+            previousButton,
+            symbol: "backward.fill",
+            toolTip: "上一首",
+            action: #selector(previousTrack),
+            pointSize: 16
+        )
+        configureButton(
+            playPauseButton,
+            symbol: "play.fill",
+            toolTip: "播放",
+            action: #selector(togglePlayPause),
+            pointSize: 19
+        )
+        configureButton(
+            nextButton,
+            symbol: "forward.fill",
+            toolTip: "下一首",
+            action: #selector(nextTrack),
+            pointSize: 16
+        )
+
+        let controls = NSStackView(views: [previousButton, playPauseButton, nextButton])
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.distribution = .equalSpacing
+        controls.spacing = 16
+        controls.translatesAutoresizingMaskIntoConstraints = false
+
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        slider.cell = CompactSliderCell()
+        slider.minValue = 0
+        slider.maxValue = 1
+        slider.sliderType = .linear
+        slider.controlSize = .small
+        slider.isContinuous = false
+        slider.target = self
+        slider.action = #selector(seek(_:))
+        slider.toolTip = "播放进度"
+
+        for label in [elapsedLabel, remainingLabel] {
+            label.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+        }
+        remainingLabel.alignment = .right
+
+        addSubview(artworkView)
+        addSubview(titleLabel)
+        addSubview(subtitleLabel)
+        addSubview(controls)
+        addSubview(slider)
+        addSubview(elapsedLabel)
+        addSubview(remainingLabel)
+
+        NSLayoutConstraint.activate([
+            artworkView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            artworkView.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            artworkView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            artworkView.widthAnchor.constraint(equalTo: artworkView.heightAnchor),
+
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            titleLabel.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            controls.centerXAnchor.constraint(equalTo: slider.centerXAnchor),
+            controls.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 5),
+            controls.heightAnchor.constraint(equalToConstant: 32),
+
+            slider.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 16),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            slider.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
+
+            elapsedLabel.leadingAnchor.constraint(equalTo: slider.leadingAnchor),
+            elapsedLabel.topAnchor.constraint(equalTo: slider.bottomAnchor),
+            remainingLabel.trailingAnchor.constraint(equalTo: slider.trailingAnchor),
+            remainingLabel.topAnchor.constraint(equalTo: slider.bottomAnchor)
+        ])
+    }
+
+    private func configureButton(
+        _ button: NSButton,
+        symbol: String,
+        toolTip: String,
+        action: Selector,
+        pointSize: CGFloat = 18
+    ) {
+        button.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: toolTip
+        )?.withSymbolConfiguration(.init(pointSize: pointSize, weight: .semibold))
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .accessoryBarAction
+        button.isBordered = false
+        button.contentTintColor = NSColor.labelColor.withAlphaComponent(0.84)
+        button.toolTip = toolTip
+        button.target = self
+        button.action = action
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: button === playPauseButton ? 40 : 34),
+            button.heightAnchor.constraint(equalToConstant: 30)
+        ])
+    }
+
+    func update(track: TrackInfo?, artworkURL: URL? = nil, message: String? = nil) {
+        guard let track else {
+            displayedTrackKey = nil
+            displayedArtworkURL = nil
+            artworkTask?.cancel()
+            artworkTask = nil
+            titleLabel.stringValue = "Apple Music Lyrics"
+            subtitleLabel.stringValue = message ?? "未播放歌曲"
+            setArtworkPlaceholder()
+            for button in [previousButton, playPauseButton, nextButton] {
+                button.isEnabled = false
+            }
+            slider.isEnabled = false
+            slider.doubleValue = 0
+            elapsedLabel.stringValue = "0:00"
+            remainingLabel.stringValue = "-0:00"
+            return
         }
 
-        plainLyricsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        let trackChanged = displayedTrackKey != track.identityKey
+        displayedTrackKey = track.identityKey
+        titleLabel.stringValue = track.title
+        if track.artist.isEmpty {
+            subtitleLabel.stringValue = track.album
+        } else if track.album.isEmpty {
+            subtitleLabel.stringValue = track.artist
+        } else {
+            subtitleLabel.stringValue = "\(track.artist) · \(track.album)"
+        }
+
+        for button in [previousButton, playPauseButton, nextButton] {
+            button.isEnabled = true
+        }
+        let isPlaying = track.state == .playing
+        let playPauseToolTip = isPlaying ? "暂停" : "播放"
+        playPauseButton.image = NSImage(
+            systemSymbolName: isPlaying ? "pause.fill" : "play.fill",
+            accessibilityDescription: playPauseToolTip
+        )?.withSymbolConfiguration(.init(pointSize: 19, weight: .semibold))
+        playPauseButton.toolTip = playPauseToolTip
+
+        let duration = max(0, track.duration)
+        let position = min(duration, max(0, track.position))
+        slider.isEnabled = duration > 0
+        slider.maxValue = max(1, duration)
+        slider.doubleValue = position
+        elapsedLabel.stringValue = formatTime(position)
+        remainingLabel.stringValue = "-" + formatTime(max(0, duration - position))
+
+        if trackChanged {
+            displayedArtworkURL = nil
+            artworkTask?.cancel()
+            artworkTask = nil
+            setArtworkPlaceholder()
+        }
+        if let artworkURL, displayedArtworkURL != artworkURL {
+            loadArtwork(from: artworkURL)
+        }
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let seconds = max(0, Int(time.rounded(.down)))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private func setArtworkPlaceholder() {
+        artworkView.image = NSImage(
+            systemSymbolName: "music.note",
+            accessibilityDescription: "专辑封面"
+        )?.withSymbolConfiguration(.init(pointSize: 26, weight: .medium))
+        artworkView.contentTintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.62)
+        artworkView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+    }
+
+    private func loadArtwork(from url: URL) {
+        displayedArtworkURL = url
+        artworkTask?.cancel()
+        var request = URLRequest(url: url)
+        request.cachePolicy = .returnCacheDataElseLoad
+        request.timeoutInterval = 10
+        artworkTask = URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let data, let image = NSImage(data: data) else { return }
+            DispatchQueue.main.async {
+                guard self?.displayedArtworkURL == url else { return }
+                self?.artworkView.image = image
+                self?.artworkView.contentTintColor = nil
+                self?.artworkView.layer?.backgroundColor = NSColor.clear.cgColor
+            }
+        }
+        artworkTask?.resume()
+    }
+
+    @objc private func previousTrack(_ sender: Any?) {
+        onPreviousTrack?()
+    }
+
+    @objc private func togglePlayPause(_ sender: Any?) {
+        onTogglePlayPause?()
+    }
+
+    @objc private func nextTrack(_ sender: Any?) {
+        onNextTrack?()
+    }
+
+    @objc private func seek(_ sender: NSSlider) {
+        onSeek?(sender.doubleValue)
     }
 }
 

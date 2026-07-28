@@ -37,6 +37,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onToggleFloatingClickThrough = { [weak self] in
             self?.floating.toggleClickThrough()
         }
+        menuBar.onSeek = { [weak self] position in
+            self?.playbackController.seek(to: position) {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
+        menuBar.onPreviousTrack = { [weak self] in
+            self?.playbackController.previousTrack {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
+        menuBar.onTogglePlayPause = { [weak self] in
+            self?.playbackController.togglePlayPause {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
+        menuBar.onNextTrack = { [weak self] in
+            self?.playbackController.nextTrack {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
         menuBar.onQuit = {
             NSApp.terminate(nil)
         }

@@ -21,7 +21,10 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
                     "name": "Test Song",
                     "artistName": "Test Artist",
                     "albumName": "Test Album",
-                    "durationInMillis": 180_000
+                    "durationInMillis": 180_000,
+                    "artwork": [
+                        "url": "https://example.test/{w}x{h}{c}.{f}"
+                    ]
                 ],
                 "relationships": [
                     "syllable-lyrics": [
@@ -49,6 +52,7 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
         XCTAssertEqual(document.source, "Apple Music")
         XCTAssertEqual(document.lines.first?.text, "Local lyric")
         XCTAssertEqual(document.wordTiming, .exact)
+        XCTAssertEqual(document.artworkURL?.absoluteString, "https://example.test/320x320bb.jpg")
     }
 
     func testRejectsDifferentArtistWithSameTitle() throws {
@@ -113,6 +117,59 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
         let document = AppleMusicCacheLyricsProvider(cacheDirectory: root).lyrics(for: track)
 
         XCTAssertEqual(document.lines.first?.text, "Localized artist lyric")
+    }
+
+    func testAcceptsSimplifiedTraditionalAndJapaneseCJKTitleVariants() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let response = try cachedResponse(
+            title: "说了再见",
+            artist: "周杰伦",
+            localizations: ttmlLine("Canonical title lyric", begin: 1, end: 2)
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "説了再見",
+            artist: "Jay Chou",
+            album: "The Era",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+        let document = AppleMusicCacheLyricsProvider(cacheDirectory: root).lyrics(for: track)
+
+        XCTAssertEqual(document.lines.first?.text, "Canonical title lyric")
+    }
+
+    func testRejectsDifferentCJKCharactersWithSamePronunciation() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let response = try cachedResponse(
+            title: "情",
+            artist: "Same Artist",
+            localizations: ttmlLine("Wrong homophone", begin: 1, end: 2)
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "晴",
+            artist: "Same Artist",
+            album: "Test Album",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+
+        XCTAssertTrue(AppleMusicCacheLyricsProvider(cacheDirectory: root).lyrics(for: track).lines.isEmpty)
     }
 
     func testReadsInlineDatabaseResponse() throws {

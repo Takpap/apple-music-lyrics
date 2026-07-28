@@ -8,6 +8,7 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
     private let databaseURL: URL
     private let maximumCandidates = 160
     private let logger = DiagnosticLogger.shared
+    private let metadataMatcher = TrackMetadataMatcher()
 
     init(
         fileManager: FileManager = .default,
@@ -22,7 +23,7 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
     }
 
     func lyrics(for track: TrackInfo) -> LyricsDocument {
-        var best: (score: Int, song: CatalogSong)?
+        var best: (match: TrackMetadataMatch, song: CatalogSong)?
         var readableCandidates = 0
         var decodedResponses = 0
         var songsExamined = 0
@@ -46,27 +47,30 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
 
             for song in response.data {
                 songsExamined += 1
-                let score = matchScore(song.attributes, track: track)
-                guard score >= 80,
-                      song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations != nil else {
+                guard song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations != nil,
+                      let match = metadataMatcher.match(song.attributes, to: track) else {
                     continue
                 }
-                if best == nil || score > best!.score {
-                    best = (score, song)
+                if best == nil || match.score > best!.match.score {
+                    best = (match, song)
                 }
             }
 
             // Exact metadata plus duration is definitive; candidates are newest first.
-            if best?.score ?? 0 >= 140 { break }
+            if best?.match.score ?? 0 >= 180 { break }
         }
 
         logger.info(
             "Lyrics cache scan finished; readable=\(readableCandidates); decoded=\(decodedResponses); "
-                + "decodeFailures=\(decodeFailures); songs=\(songsExamined); bestScore=\(best?.score ?? 0)"
+                + "decodeFailures=\(decodeFailures); songs=\(songsExamined); "
+                + "bestScore=\(best?.match.score ?? 0)"
         )
         guard let song = best?.song else {
             logger.warning("No matching cached lyrics response found")
             return .empty
+        }
+        if let match = best?.match {
+            logger.info("Lyrics metadata matched; evidence=\(match.evidence)")
         }
         guard let rawTTML = song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations,
               let selection = localizedTTML(from: rawTTML) else {
@@ -100,7 +104,8 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             plainText: enrichedLines.map(\.text).joined(separator: "\n"),
             source: "Apple Music",
             isSynced: true,
-            wordTiming: parsed.wordTiming
+            wordTiming: parsed.wordTiming,
+            artworkURL: song.attributes.artwork?.resolvedURL
         )
     }
 
@@ -219,88 +224,6 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         return fileManager.isReadableFile(atPath: url.path) ? url : nil
     }
 
-    // MARK: - Matching
-
-    private func matchScore(_ song: CatalogSongAttributes, track: TrackInfo) -> Int {
-        let wantedTitle = normalized(track.title)
-        let candidateTitle = normalized(song.name)
-        guard !wantedTitle.isEmpty, !candidateTitle.isEmpty else { return 0 }
-
-        let durationDifference: TimeInterval? = {
-            guard track.duration > 0,
-                  let duration = song.durationInMillis,
-                  duration > 0 else { return nil }
-            return abs(Double(duration) / 1000 - track.duration)
-        }()
-
-        var score = 0
-        let titleMatchesExactly = candidateTitle == wantedTitle
-        if titleMatchesExactly {
-            score += 70
-        } else if candidateTitle.contains(wantedTitle) || wantedTitle.contains(candidateTitle) {
-            score += 35
-        } else {
-            return 0
-        }
-
-        let wantedArtist = normalized(track.artist)
-        let candidateArtist = normalized(song.artistName)
-        if !wantedArtist.isEmpty, !candidateArtist.isEmpty {
-            if candidateArtist == wantedArtist {
-                score += 40
-            } else if candidateArtist.contains(wantedArtist) || wantedArtist.contains(candidateArtist) {
-                score += 20
-            } else if titleMatchesExactly,
-                      durationDifference.map({ $0 <= 2 }) == true,
-                      usesDifferentWritingSystems(wantedArtist, candidateArtist) {
-                // Music may expose a romanized artist while the catalog cache
-                // contains its CJK localization (for example, Jay Chou / 周杰伦).
-            } else {
-                score -= 35
-            }
-        }
-
-        if let difference = durationDifference {
-            if difference <= 2 { score += 30 }
-            else if difference <= 5 { score += 20 }
-            else if difference <= 12 { score += 5 }
-            else { score -= 30 }
-        }
-
-        let wantedAlbum = normalized(track.album)
-        let candidateAlbum = normalized(song.albumName ?? "")
-        if !wantedAlbum.isEmpty, wantedAlbum == candidateAlbum { score += 10 }
-        return score
-    }
-
-    private func normalized(_ value: String) -> String {
-        let folded = value.folding(
-            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-            locale: .current
-        )
-        return String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
-    }
-
-    private func usesDifferentWritingSystems(_ lhs: String, _ rhs: String) -> Bool {
-        (containsASCIILetter(lhs) && containsCJKCharacter(rhs))
-            || (containsCJKCharacter(lhs) && containsASCIILetter(rhs))
-    }
-
-    private func containsASCIILetter(_ value: String) -> Bool {
-        value.unicodeScalars.contains {
-            (65...90).contains($0.value) || (97...122).contains($0.value)
-        }
-    }
-
-    private func containsCJKCharacter(_ value: String) -> Bool {
-        value.unicodeScalars.contains {
-            (0x3400...0x4DBF).contains($0.value)
-                || (0x4E00...0x9FFF).contains($0.value)
-                || (0xF900...0xFAFF).contains($0.value)
-                || (0x20000...0x323AF).contains($0.value)
-        }
-    }
-
     private func localizedTTML(from value: TTMLLocalizations) -> LocalizedTTMLSelection? {
         let localizations: [String: String]
         switch value {
@@ -388,6 +311,206 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
     }
 }
 
+private struct TrackMetadataMatch {
+    let score: Int
+    let evidence: String
+}
+
+private struct TrackMetadataMatcher {
+    func match(_ song: CatalogSongAttributes, to track: TrackInfo) -> TrackMetadataMatch? {
+        let wantedTitle = ComparableMetadataText(track.title)
+        let candidateTitle = ComparableMetadataText(song.name)
+        let titleMatch = wantedTitle.match(candidateTitle)
+        guard titleMatch != .none else { return nil }
+
+        let durationDifference: TimeInterval? = {
+            guard track.duration > 0,
+                  let duration = song.durationInMillis,
+                  duration > 0 else { return nil }
+            return abs(Double(duration) / 1000 - track.duration)
+        }()
+        if let durationDifference, durationDifference > 12 { return nil }
+
+        let wantedArtist = ComparableMetadataText(track.artist)
+        let candidateArtist = ComparableMetadataText(song.artistName)
+        let artistMatch = wantedArtist.match(candidateArtist)
+        let artistMissing = wantedArtist.isEmpty || candidateArtist.isEmpty
+        let localizedArtist = wantedArtist.usesDifferentWritingSystem(from: candidateArtist)
+        let artistIsTrusted = artistMatch.isStrongIdentity
+
+        let wantedAlbum = ComparableMetadataText(track.album)
+        let candidateAlbum = ComparableMetadataText(song.albumName ?? "")
+        let albumMatch = wantedAlbum.match(candidateAlbum)
+        let albumIsTrusted = albumMatch.isStrongIdentity
+
+        let durationIsTight = durationDifference.map { $0 <= 2 } == true
+        let durationIsNear = durationDifference.map { $0 <= 5 } == true
+        let accepted: Bool
+        switch titleMatch {
+        case .exact, .canonical:
+            accepted = artistIsTrusted
+                || (durationIsTight && (localizedArtist || artistMissing || albumIsTrusted))
+        case .transliterated:
+            accepted = durationIsTight && (artistIsTrusted || albumIsTrusted)
+        case .contained:
+            accepted = durationIsNear && artistIsTrusted
+        case .none:
+            accepted = false
+        }
+        guard accepted else { return nil }
+
+        var score = titleMatch.titleScore
+        if artistIsTrusted {
+            score += artistMatch.identityScore
+        } else if localizedArtist {
+            score += 10
+        } else if !artistMissing {
+            score -= 40
+        }
+        if albumIsTrusted {
+            score += albumMatch.albumScore
+        }
+        if let durationDifference {
+            if durationDifference <= 2 { score += 40 }
+            else if durationDifference <= 5 { score += 25 }
+            else { score += 5 }
+        }
+
+        let durationEvidence = durationDifference.map {
+            String(format: "%.1fs", $0)
+        } ?? "unavailable"
+        let artistEvidence = artistIsTrusted
+            ? artistMatch.label
+            : (localizedArtist ? "localized-writing-system" : "missing")
+        return TrackMetadataMatch(
+            score: score,
+            evidence: "title=\(titleMatch.label); artist=\(artistEvidence); "
+                + "album=\(albumMatch.label); durationDelta=\(durationEvidence)"
+        )
+    }
+}
+
+private enum MetadataTextMatch: Equatable {
+    case exact
+    case canonical
+    case transliterated
+    case contained
+    case none
+
+    var label: String {
+        switch self {
+        case .exact: return "exact"
+        case .canonical: return "cjk-canonical"
+        case .transliterated: return "transliterated"
+        case .contained: return "contained"
+        case .none: return "none"
+        }
+    }
+
+    var isStrongIdentity: Bool {
+        switch self {
+        case .exact, .canonical, .transliterated: return true
+        case .contained, .none: return false
+        }
+    }
+
+    var titleScore: Int {
+        switch self {
+        case .exact: return 100
+        case .canonical: return 95
+        case .transliterated: return 80
+        case .contained: return 45
+        case .none: return 0
+        }
+    }
+
+    var identityScore: Int {
+        switch self {
+        case .exact: return 45
+        case .canonical: return 42
+        case .transliterated: return 35
+        case .contained: return 20
+        case .none: return 0
+        }
+    }
+
+    var albumScore: Int {
+        switch self {
+        case .exact: return 20
+        case .canonical: return 18
+        case .transliterated: return 12
+        case .contained: return 6
+        case .none: return 0
+        }
+    }
+}
+
+private struct ComparableMetadataText {
+    private static let cjkCanonicalTransform = StringTransform("Traditional-Simplified")
+
+    let surface: String
+    let cjkCanonical: String
+    let transliterated: String
+    let containsCJK: Bool
+    let containsASCIILatin: Bool
+
+    var isEmpty: Bool { surface.isEmpty }
+
+    init(_ value: String) {
+        surface = Self.compact(value, stripsDiacritics: true)
+        let canonical = value.applyingTransform(Self.cjkCanonicalTransform, reverse: false) ?? value
+        cjkCanonical = Self.compact(canonical, stripsDiacritics: true)
+        let latin = canonical.applyingTransform(.toLatin, reverse: false) ?? canonical
+        transliterated = Self.compact(latin, stripsDiacritics: false)
+        containsCJK = value.unicodeScalars.contains { Self.isCJK($0.value) }
+        containsASCIILatin = value.unicodeScalars.contains {
+            (65...90).contains($0.value) || (97...122).contains($0.value)
+        }
+    }
+
+    func match(_ other: ComparableMetadataText) -> MetadataTextMatch {
+        guard !isEmpty, !other.isEmpty else { return .none }
+        if surface == other.surface { return .exact }
+        if cjkCanonical == other.cjkCanonical { return .canonical }
+        let bothUseCJK = containsCJK && other.containsCJK
+        if !bothUseCJK,
+           !transliterated.isEmpty,
+           transliterated == other.transliterated {
+            return .transliterated
+        }
+        if Self.containsEitherDirection(surface, other.surface)
+            || Self.containsEitherDirection(cjkCanonical, other.cjkCanonical)
+            || (!bothUseCJK
+                && Self.containsEitherDirection(transliterated, other.transliterated)) {
+            return .contained
+        }
+        return .none
+    }
+
+    func usesDifferentWritingSystem(from other: ComparableMetadataText) -> Bool {
+        (containsCJK && other.containsASCIILatin)
+            || (containsASCIILatin && other.containsCJK)
+    }
+
+    private static func containsEitherDirection(_ lhs: String, _ rhs: String) -> Bool {
+        min(lhs.count, rhs.count) >= 3 && (lhs.contains(rhs) || rhs.contains(lhs))
+    }
+
+    private static func compact(_ value: String, stripsDiacritics: Bool) -> String {
+        var options: String.CompareOptions = [.caseInsensitive, .widthInsensitive]
+        if stripsDiacritics { options.insert(.diacriticInsensitive) }
+        let folded = value.folding(options: options, locale: Locale(identifier: "en_US_POSIX"))
+        return String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
+    private static func isCJK(_ value: UInt32) -> Bool {
+        (0x3400...0x4DBF).contains(value)
+            || (0x4E00...0x9FFF).contains(value)
+            || (0xF900...0xFAFF).contains(value)
+            || (0x20000...0x323AF).contains(value)
+    }
+}
+
 private struct LocalizedTTMLSelection {
     let primaryTTML: String
     let alternatives: [LocalizedTTMLAlternative]
@@ -452,6 +575,21 @@ private struct CatalogSongAttributes: Decodable {
     let artistName: String
     let albumName: String?
     let durationInMillis: Int?
+    let artwork: CatalogArtwork?
+}
+
+private struct CatalogArtwork: Decodable {
+    let url: String
+
+    var resolvedURL: URL? {
+        URL(
+            string: url
+                .replacingOccurrences(of: "{w}", with: "320")
+                .replacingOccurrences(of: "{h}", with: "320")
+                .replacingOccurrences(of: "{c}", with: "bb")
+                .replacingOccurrences(of: "{f}", with: "jpg")
+        )
+    }
 }
 
 private struct CatalogRelationships: Decodable {

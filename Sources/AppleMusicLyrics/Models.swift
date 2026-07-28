@@ -91,13 +91,31 @@ struct LyricsDocument: Equatable, Sendable {
     let source: String
     let isSynced: Bool
     let wordTiming: WordTimingQuality
+    let artworkURL: URL?
+
+    init(
+        lines: [LyricLine],
+        plainText: String?,
+        source: String,
+        isSynced: Bool,
+        wordTiming: WordTimingQuality,
+        artworkURL: URL? = nil
+    ) {
+        self.lines = lines
+        self.plainText = plainText
+        self.source = source
+        self.isSynced = isSynced
+        self.wordTiming = wordTiming
+        self.artworkURL = artworkURL
+    }
 
     static let empty = LyricsDocument(
         lines: [],
         plainText: nil,
         source: "none",
         isSynced: false,
-        wordTiming: .none
+        wordTiming: .none,
+        artworkURL: nil
     )
 
     var hasKaraoke: Bool {
