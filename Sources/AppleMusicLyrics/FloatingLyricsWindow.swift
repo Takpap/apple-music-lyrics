@@ -23,6 +23,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     private var localModifierMonitor: Any?
     private var globalModifierMonitor: Any?
     private var immersiveHeight = CGFloat(AppPreferences.floatingLyricsImmersiveHeight)
+    private var frameBeforeZoom: NSRect?
 
     var onVisibilityChanged: ((Bool) -> Void)?
     var onSeek: ((TimeInterval) -> Void)?
@@ -175,6 +176,9 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
         effect.onHoverChanged = { [weak self] hovering in
             self?.setToolbarVisible(hovering)
             self?.canvas.setPointerInside(hovering)
+        }
+        effect.onDoubleClickTop = { [weak self] in
+            self?.toggleZoomedFrame()
         }
 
         NSLayoutConstraint.activate([
@@ -436,6 +440,27 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
         hide()
     }
 
+    private func toggleZoomedFrame() {
+        if let restoreFrame = frameBeforeZoom {
+            frameBeforeZoom = nil
+            panel.setFrame(
+                restoreFrame,
+                display: true,
+                animate: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            )
+            saveFrame()
+            return
+        }
+
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        frameBeforeZoom = panel.frame
+        panel.setFrame(
+            screen.visibleFrame,
+            display: true,
+            animate: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        )
+    }
+
     @objc private func showSettings(_ sender: NSButton) {
         let menu = settingsMenu()
         menu.popUp(
@@ -623,6 +648,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     private func saveFrame() {
         frameSaveWorkItem?.cancel()
         frameSaveWorkItem = nil
+        guard frameBeforeZoom == nil else { return }
         guard let screen = panel.screen ?? NSScreen.main else { return }
         var frames = AppPreferences.floatingLyricsFramesByDisplay
         let id = displayID(for: screen)
@@ -743,7 +769,17 @@ private final class PassthroughView: NSView {
 
 private final class HoverTrackingView: NSView {
     var onHoverChanged: ((Bool) -> Void)?
+    var onDoubleClickTop: (() -> Void)?
     private var hoverTrackingArea: NSTrackingArea?
+
+    override func mouseDown(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        if event.clickCount == 2, location.y >= bounds.maxY - 54 {
+            onDoubleClickTop?()
+            return
+        }
+        super.mouseDown(with: event)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
