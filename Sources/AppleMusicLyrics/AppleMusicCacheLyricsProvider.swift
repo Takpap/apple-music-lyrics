@@ -226,8 +226,16 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         let candidateTitle = normalized(song.name)
         guard !wantedTitle.isEmpty, !candidateTitle.isEmpty else { return 0 }
 
+        let durationDifference: TimeInterval? = {
+            guard track.duration > 0,
+                  let duration = song.durationInMillis,
+                  duration > 0 else { return nil }
+            return abs(Double(duration) / 1000 - track.duration)
+        }()
+
         var score = 0
-        if candidateTitle == wantedTitle {
+        let titleMatchesExactly = candidateTitle == wantedTitle
+        if titleMatchesExactly {
             score += 70
         } else if candidateTitle.contains(wantedTitle) || wantedTitle.contains(candidateTitle) {
             score += 35
@@ -242,13 +250,17 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
                 score += 40
             } else if candidateArtist.contains(wantedArtist) || wantedArtist.contains(candidateArtist) {
                 score += 20
+            } else if titleMatchesExactly,
+                      durationDifference.map({ $0 <= 2 }) == true,
+                      usesDifferentWritingSystems(wantedArtist, candidateArtist) {
+                // Music may expose a romanized artist while the catalog cache
+                // contains its CJK localization (for example, Jay Chou / 周杰伦).
             } else {
                 score -= 35
             }
         }
 
-        if track.duration > 0, let duration = song.durationInMillis, duration > 0 {
-            let difference = abs(Double(duration) / 1000 - track.duration)
+        if let difference = durationDifference {
             if difference <= 2 { score += 30 }
             else if difference <= 5 { score += 20 }
             else if difference <= 12 { score += 5 }
@@ -267,6 +279,26 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             locale: .current
         )
         return String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
+    private func usesDifferentWritingSystems(_ lhs: String, _ rhs: String) -> Bool {
+        (containsASCIILetter(lhs) && containsCJKCharacter(rhs))
+            || (containsCJKCharacter(lhs) && containsASCIILetter(rhs))
+    }
+
+    private func containsASCIILetter(_ value: String) -> Bool {
+        value.unicodeScalars.contains {
+            (65...90).contains($0.value) || (97...122).contains($0.value)
+        }
+    }
+
+    private func containsCJKCharacter(_ value: String) -> Bool {
+        value.unicodeScalars.contains {
+            (0x3400...0x4DBF).contains($0.value)
+                || (0x4E00...0x9FFF).contains($0.value)
+                || (0xF900...0xFAFF).contains($0.value)
+                || (0x20000...0x323AF).contains($0.value)
+        }
     }
 
     private func localizedTTML(from value: TTMLLocalizations) -> LocalizedTTMLSelection? {

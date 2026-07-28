@@ -88,6 +88,33 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
         XCTAssertTrue(provider.lyrics(for: track).lines.isEmpty)
     }
 
+    func testAcceptsLocalizedCJKArtistNameWithExactTitleAndDuration() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let response = try cachedResponse(
+            title: "Sunset Boulevard",
+            artist: "梁博",
+            localizations: ttmlLine("Localized artist lyric", begin: 1, end: 2)
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "Sunset Boulevard",
+            artist: "Bruce Liang",
+            album: "Hide and Seek",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+        let document = AppleMusicCacheLyricsProvider(cacheDirectory: root).lyrics(for: track)
+
+        XCTAssertEqual(document.lines.first?.text, "Localized artist lyric")
+    }
+
     func testReadsInlineDatabaseResponse() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
