@@ -50,13 +50,25 @@ struct LyricLine: Equatable, Sendable, Identifiable {
     let text: String
     /// Per-unit timings for karaoke highlighting.
     let words: [LyricWord]
+    /// Optional localized meaning aligned to this line.
+    let translation: String?
+    /// Optional phonetic/romanized reading aligned to this line.
+    let transliteration: String?
 
     var id: String { "\(time)-\(text.hashValue)" }
 
-    init(time: TimeInterval, text: String, words: [LyricWord] = []) {
+    init(
+        time: TimeInterval,
+        text: String,
+        words: [LyricWord] = [],
+        translation: String? = nil,
+        transliteration: String? = nil
+    ) {
         self.time = time
         self.text = text
         self.words = words
+        self.translation = translation
+        self.transliteration = transliteration
     }
 
     var endTime: TimeInterval {

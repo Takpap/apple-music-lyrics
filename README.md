@@ -23,6 +23,12 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 - Adaptive status bar width for MacBooks and notched displays
 - Long lines scroll inside the status item instead of hiding other menu bar icons
 - Always-on-top floating lyrics panel with animated line changes
+- Immersive and compact desktop floating-lyrics modes
+- Hover controls with window locking, click-through, and Option-key temporary interaction
+- Click a nearby lyric line to seek, with optional translation and transliteration display
+- Scroll through lyrics manually; the view snaps to a line and resumes playback follow automatically
+- Per-display window positions, configurable Space behavior, and native macOS 26 glass
+- Global shortcuts: `Control-Option-L` to show/hide and `Control-Option-K` to lock/unlock
 - Nearby-line preview in the status item menu
 - Automatic cache rescanning after track changes
 - No third-party packages, analytics, account-token extraction, or lyrics requests
@@ -180,7 +186,9 @@ or upgraded.
 
 | Action | Description |
 | --- | --- |
-| Show / Hide Floating Lyrics | Toggle the floating panel (`Command-L` while the menu is focused) |
+| Show / Hide Floating Lyrics | Toggle the floating panel (`Control-Option-L` globally) |
+| Lock / Unlock Floating Lyrics | Prevent moving and resizing (`Control-Option-K` globally) |
+| Click Through Floating Lyrics | Pass pointer input to the app underneath; hold `Option` to interact temporarily |
 | Refresh Lyrics | Rescan Music.app's local lyrics cache |
 | Diagnostic Log | View, copy, or reveal the local diagnostic log in Finder |
 | Quit Apple Music Lyrics | Exit the app |

@@ -21,6 +21,12 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 - 根据 MacBook 和刘海屏自动调整状态栏宽度
 - 长歌词在状态项内部滚动，不会持续挤占其他菜单栏图标
 - 始终置顶的浮动歌词面板，支持歌词换行动画
+- 浮窗支持沉浸和紧凑桌面两种显示模式
+- 悬停控制条支持锁定、鼠标穿透，以及按住 `Option` 临时交互
+- 点击相邻歌词可跳转播放，并可按数据可用性显示翻译和音译
+- 可手动滚动浏览歌词，停止后按行吸附，并自动恢复播放跟随
+- 按显示器记忆窗口位置，可配置空间策略，并适配 macOS 26 Liquid Glass
+- 全局快捷键：`Control-Option-L` 显示/隐藏，`Control-Option-K` 锁定/解锁
 - 在状态项菜单中预览当前歌词附近的内容
 - 切换歌曲后自动重新扫描歌词缓存
 - 无第三方依赖、无数据分析、不会提取账户令牌，也不会主动请求歌词
@@ -170,7 +176,9 @@ open "/Applications/Apple Music Lyrics.app"
 
 | 操作 | 说明 |
 | --- | --- |
-| Show / Hide Floating Lyrics | 显示或隐藏浮动歌词面板（菜单聚焦时可按 `Command-L`） |
+| Show / Hide Floating Lyrics | 显示或隐藏浮动歌词面板（全局 `Control-Option-L`） |
+| Lock / Unlock Floating Lyrics | 禁止移动和缩放浮窗（全局 `Control-Option-K`） |
+| Click Through Floating Lyrics | 让鼠标操作穿透到下层应用；按住 `Option` 可临时操作浮窗 |
 | Refresh Lyrics | 重新扫描 Music.app 的本地歌词缓存 |
 | Diagnostic Log | 查看、复制诊断日志，或在 Finder 中显示日志文件 |
 | Quit Apple Music Lyrics | 退出应用 |

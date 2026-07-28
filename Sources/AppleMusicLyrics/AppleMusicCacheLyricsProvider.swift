@@ -69,13 +69,13 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             return .empty
         }
         guard let rawTTML = song.relationships?.syllableLyrics?.data.first?.attributes.ttmlLocalizations,
-              let ttml = localizedTTML(from: rawTTML) else {
+              let selection = localizedTTML(from: rawTTML) else {
             logger.warning("Matching response has an unsupported or empty ttmlLocalizations value")
             return .empty
         }
         let parsed: ParsedAppleTTML
         do {
-            parsed = try AppleTTMLParser.parse(ttml)
+            parsed = try AppleTTMLParser.parse(selection.primaryTTML)
         } catch {
             logger.error("TTML parsing failed: \(error.localizedDescription)")
             return .empty
@@ -84,11 +84,20 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             logger.warning("TTML parsed successfully but contained no lyric lines")
             return .empty
         }
-        logger.info("Lyrics loaded; lines=\(parsed.lines.count); wordTiming=\(parsed.wordTiming.rawValue)")
+        let enrichedLines = enrich(
+            parsed.lines,
+            with: selection.alternatives
+        )
+        let translatedCount = enrichedLines.filter { $0.translation != nil }.count
+        let transliteratedCount = enrichedLines.filter { $0.transliteration != nil }.count
+        logger.info(
+            "Lyrics loaded; lines=\(parsed.lines.count); wordTiming=\(parsed.wordTiming.rawValue); "
+                + "translations=\(translatedCount); transliterations=\(transliteratedCount)"
+        )
 
         return LyricsDocument(
-            lines: parsed.lines,
-            plainText: parsed.lines.map(\.text).joined(separator: "\n"),
+            lines: enrichedLines,
+            plainText: enrichedLines.map(\.text).joined(separator: "\n"),
             source: "Apple Music",
             isSynced: true,
             wordTiming: parsed.wordTiming
@@ -260,12 +269,14 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         return String(folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
     }
 
-    private func localizedTTML(from value: TTMLLocalizations) -> String? {
+    private func localizedTTML(from value: TTMLLocalizations) -> LocalizedTTMLSelection? {
         let localizations: [String: String]
         switch value {
         case .ttml(let raw):
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("<") { return trimmed }
+            if trimmed.hasPrefix("<") {
+                return LocalizedTTMLSelection(primaryTTML: trimmed, alternatives: [])
+            }
             guard let data = trimmed.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
                 return nil
@@ -275,15 +286,84 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             localizations = values
         }
         let preferred = Locale.preferredLanguages
+        var selectedKey: String?
         for language in preferred {
-            if let exact = localizations[language] { return exact }
+            if localizations[language] != nil {
+                selectedKey = language
+                break
+            }
             let base = language.split(separator: "-").first.map(String.init)
-            if let base, let match = localizations.first(where: { $0.key.hasPrefix(base) }) {
-                return match.value
+            if let base,
+               let match = localizations.keys.sorted().first(where: { $0.hasPrefix(base) }) {
+                selectedKey = match
+                break
             }
         }
-        return localizations.values.first
+        guard let key = selectedKey ?? localizations.keys.sorted().first,
+              let primary = localizations[key] else { return nil }
+        let alternatives = localizations
+            .filter { $0.key != key && $0.value != primary }
+            .sorted { $0.key < $1.key }
+            .map { LocalizedTTMLAlternative(locale: $0.key, ttml: $0.value) }
+        return LocalizedTTMLSelection(primaryTTML: primary, alternatives: alternatives)
     }
+
+    private func enrich(
+        _ primaryLines: [LyricLine],
+        with alternatives: [LocalizedTTMLAlternative]
+    ) -> [LyricLine] {
+        var translations: [Int: String] = [:]
+        var transliterations: [Int: String] = [:]
+
+        for alternative in alternatives {
+            guard let parsed = try? AppleTTMLParser.parse(alternative.ttml) else { continue }
+            let normalizedLocale = alternative.locale.lowercased()
+            let isTransliteration = normalizedLocale.contains("latn")
+                || normalizedLocale.contains("roman")
+                || normalizedLocale.contains("translit")
+
+            for (alternativeIndex, alternativeLine) in parsed.lines.enumerated() {
+                let index: Int?
+                if alternativeIndex < primaryLines.count,
+                   abs(primaryLines[alternativeIndex].time - alternativeLine.time) <= 1 {
+                    index = alternativeIndex
+                } else {
+                    index = primaryLines.indices.min {
+                        abs(primaryLines[$0].time - alternativeLine.time)
+                            < abs(primaryLines[$1].time - alternativeLine.time)
+                    }
+                }
+                guard let index,
+                      abs(primaryLines[index].time - alternativeLine.time) <= 1,
+                      primaryLines[index].text != alternativeLine.text else { continue }
+                if isTransliteration {
+                    transliterations[index, default: alternativeLine.text] = alternativeLine.text
+                } else if translations[index] == nil {
+                    translations[index] = alternativeLine.text
+                }
+            }
+        }
+
+        return primaryLines.enumerated().map { index, line in
+            LyricLine(
+                time: line.time,
+                text: line.text,
+                words: line.words,
+                translation: translations[index],
+                transliteration: transliterations[index]
+            )
+        }
+    }
+}
+
+private struct LocalizedTTMLSelection {
+    let primaryTTML: String
+    let alternatives: [LocalizedTTMLAlternative]
+}
+
+private struct LocalizedTTMLAlternative {
+    let locale: String
+    let ttml: String
 }
 
 private enum CacheCandidate {

@@ -15,6 +15,16 @@ final class MenuBarController: NSObject {
         action: #selector(toggleFloating),
         keyEquivalent: "l"
     )
+    private let lockFloatingItem = NSMenuItem(
+        title: "Lock Floating Lyrics",
+        action: #selector(toggleFloatingLock),
+        keyEquivalent: "k"
+    )
+    private let clickThroughItem = NSMenuItem(
+        title: "Click Through Floating Lyrics",
+        action: #selector(toggleFloatingClickThrough),
+        keyEquivalent: ""
+    )
 
     private var lyricMenuItems: [NSMenuItem] = []
     private var plainLyricsWindow: NSWindow?
@@ -25,12 +35,18 @@ final class MenuBarController: NSObject {
 
     var onRefreshLyrics: (() -> Void)?
     var onToggleFloating: (() -> Void)?
+    var onToggleFloatingLock: (() -> Void)?
+    var onToggleFloatingClickThrough: (() -> Void)?
     var onQuit: (() -> Void)?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
         floatingItem.target = self
+        floatingItem.keyEquivalentModifierMask = [.control, .option]
+        lockFloatingItem.target = self
+        lockFloatingItem.keyEquivalentModifierMask = [.control, .option]
+        clickThroughItem.target = self
         configureStatusItem()
         rebuildMenu()
     }
@@ -53,6 +69,12 @@ final class MenuBarController: NSObject {
         floatingVisible = visible
         floatingItem.title = visible ? "Hide Floating Lyrics" : "Show Floating Lyrics"
         floatingItem.state = visible ? .on : .off
+    }
+
+    func setFloatingInteraction(locked: Bool, clickThrough: Bool) {
+        lockFloatingItem.title = locked ? "Unlock Floating Lyrics" : "Lock Floating Lyrics"
+        lockFloatingItem.state = locked ? .on : .off
+        clickThroughItem.state = clickThrough ? .on : .off
     }
 
     private func configureStatusItem() {
@@ -91,6 +113,8 @@ final class MenuBarController: NSObject {
         menu.addItem(.separator())
 
         menu.addItem(floatingItem)
+        menu.addItem(lockFloatingItem)
+        menu.addItem(clickThroughItem)
 
         let refresh = NSMenuItem(
             title: "Refresh Lyrics",
@@ -139,6 +163,14 @@ final class MenuBarController: NSObject {
         )
         quit.target = self
         menu.addItem(quit)
+    }
+
+    @objc private func toggleFloatingLock() {
+        onToggleFloatingLock?()
+    }
+
+    @objc private func toggleFloatingClickThrough() {
+        onToggleFloatingClickThrough?()
     }
 
     // MARK: - Public updates

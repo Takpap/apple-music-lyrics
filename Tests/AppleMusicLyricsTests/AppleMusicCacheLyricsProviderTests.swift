@@ -165,6 +165,42 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
         XCTAssertEqual(document.lines.first?.text, "Fallback lyric")
     }
 
+    func testAttachesAvailableTranslationAndTransliteration() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let preferredLocale = Locale.preferredLanguages.first ?? "en-US"
+        let response = try cachedResponse(
+            title: "Localized Song",
+            artist: "Localized Artist",
+            localizations: [
+                preferredLocale: ttmlLine("原文", begin: 1, end: 2),
+                "fr-Translation": ttmlLine("Translated line", begin: 1, end: 2),
+                "ja-Latn": ttmlLine("genbun", begin: 1, end: 2)
+            ]
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "Localized Song",
+            artist: "Localized Artist",
+            album: "Test Album",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+        let line = AppleMusicCacheLyricsProvider(cacheDirectory: root)
+            .lyrics(for: track)
+            .lines.first
+
+        XCTAssertEqual(line?.text, "原文")
+        XCTAssertEqual(line?.translation, "Translated line")
+        XCTAssertEqual(line?.transliteration, "genbun")
+    }
+
     private func cachedResponse(
         title: String,
         artist: String,
@@ -195,6 +231,12 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0)
+    }
+
+    private func ttmlLine(_ text: String, begin: Double, end: Double) -> String {
+        """
+        <tt><body><div><p begin="\(begin)" end="\(end)"><span begin="\(begin)" end="\(end)">\(text)</span></p></div></body></tt>
+        """
     }
 }
 

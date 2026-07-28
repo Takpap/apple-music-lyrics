@@ -5,6 +5,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let floating = FloatingLyricsController()
     private let playbackMonitor = PlaybackMonitor()
     private let lyricsService = LyricsService()
+    private let playbackController = MusicPlaybackController()
+    private let globalHotKeys = GlobalHotKeyController()
     private let logger = DiagnosticLogger.shared
 
     private var currentTrackKey: String?
@@ -29,18 +31,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onToggleFloating = { [weak self] in
             self?.floating.toggle()
         }
+        menuBar.onToggleFloatingLock = { [weak self] in
+            self?.floating.toggleLocked()
+        }
+        menuBar.onToggleFloatingClickThrough = { [weak self] in
+            self?.floating.toggleClickThrough()
+        }
         menuBar.onQuit = {
             NSApp.terminate(nil)
+        }
+
+        floating.onSeek = { [weak self] position in
+            self?.playbackController.seek(to: position) {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
+        globalHotKeys.onToggleFloating = { [weak self] in
+            self?.floating.toggle()
+        }
+        globalHotKeys.onToggleLock = { [weak self] in
+            self?.floating.toggleLocked()
         }
 
         floating.onVisibilityChanged = { [weak self] visible in
             AppPreferences.floatingLyricsVisible = visible
             self?.menuBar.setFloatingVisible(visible)
         }
+        floating.onInteractionChanged = { [weak self] locked, clickThrough in
+            self?.menuBar.setFloatingInteraction(locked: locked, clickThrough: clickThrough)
+        }
 
         let showFloating = AppPreferences.floatingLyricsVisible
         floating.setVisible(showFloating)
         menuBar.setFloatingVisible(showFloating)
+        menuBar.setFloatingInteraction(
+            locked: AppPreferences.floatingLyricsLocked,
+            clickThrough: AppPreferences.floatingLyricsClickThrough
+        )
 
         menuBar.apply(status: .idle)
         floating.apply(status: .idle)
