@@ -285,6 +285,106 @@ final class AppleMusicCacheLyricsProviderTests: XCTestCase {
         XCTAssertEqual(line?.transliteration, "genbun")
     }
 
+    func testPrefersSimplifiedChineseLocalizationForHansLocale() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let response = try cachedResponse(
+            title: "Chinese Song",
+            artist: "Chinese Artist",
+            localizations: [
+                "zh-Hant-TW": ttmlLine("繁體歌詞", begin: 1, end: 2),
+                "zh_CN": ttmlLine("简体歌词", begin: 1, end: 2)
+            ]
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "Chinese Song",
+            artist: "Chinese Artist",
+            album: "Test Album",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+        let document = AppleMusicCacheLyricsProvider(
+            cacheDirectory: root,
+            preferredLanguages: ["zh-Hans-CN"]
+        ).lyrics(for: track)
+
+        XCTAssertEqual(document.lines.first?.text, "简体歌词")
+    }
+
+    func testConvertsTraditionalChineseFallbackForHansLocale() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let response = try cachedResponse(
+            title: "Traditional Song",
+            artist: "Traditional Artist",
+            localizations: [
+                "zh-Hant": ttmlLine("繁體歌詞", begin: 1, end: 2)
+            ]
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "Traditional Song",
+            artist: "Traditional Artist",
+            album: "Test Album",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+        let document = AppleMusicCacheLyricsProvider(
+            cacheDirectory: root,
+            preferredLanguages: ["zh-Hans-CN"]
+        ).lyrics(for: track)
+
+        XCTAssertEqual(document.lines.first?.text, "繁体歌词")
+    }
+
+    func testConvertsLanguageTaggedInlineTTMLForHansLocale() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dataDirectory = root.appendingPathComponent("fsCachedData", isDirectory: true)
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let taggedTTML = """
+        <tt xml:lang="zh-Hant"><body><div>
+          <p begin="1.0" end="2.0"><span begin="1.0" end="2.0">繁體歌詞</span></p>
+        </div></body></tt>
+        """
+        let response = try cachedResponse(
+            title: "Tagged Song",
+            artist: "Tagged Artist",
+            localizations: taggedTTML
+        )
+        try response.write(to: dataDirectory.appendingPathComponent(UUID().uuidString))
+
+        let track = TrackInfo(
+            title: "Tagged Song",
+            artist: "Tagged Artist",
+            album: "Test Album",
+            duration: 180,
+            position: 1.5,
+            state: .playing
+        )
+        let document = AppleMusicCacheLyricsProvider(
+            cacheDirectory: root,
+            preferredLanguages: ["zh-Hans-CN"]
+        ).lyrics(for: track)
+
+        XCTAssertEqual(document.lines.first?.text, "繁体歌词")
+    }
+
     private func cachedResponse(
         title: String,
         artist: String,

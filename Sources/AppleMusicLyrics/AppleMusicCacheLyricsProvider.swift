@@ -6,15 +6,18 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
     private let fileManager: FileManager
     private let cacheDirectory: URL
     private let databaseURL: URL
+    private let preferredLanguages: [String]
     private let maximumCandidates = 160
     private let logger = DiagnosticLogger.shared
     private let metadataMatcher = TrackMetadataMatcher()
 
     init(
         fileManager: FileManager = .default,
-        cacheDirectory: URL? = nil
+        cacheDirectory: URL? = nil,
+        preferredLanguages: [String] = Locale.preferredLanguages
     ) {
         self.fileManager = fileManager
+        self.preferredLanguages = preferredLanguages
         let root = cacheDirectory
             ?? fileManager.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Caches/com.apple.Music", isDirectory: true)
@@ -77,6 +80,7 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
             logger.warning("Matching response has an unsupported or empty ttmlLocalizations value")
             return .empty
         }
+        logger.info("Lyrics localization selected; locale=\(selection.locale ?? "unlabeled")")
         let parsed: ParsedAppleTTML
         do {
             parsed = try AppleTTMLParser.parse(selection.primaryTTML)
@@ -230,7 +234,19 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         case .ttml(let raw):
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("<") {
-                return LocalizedTTMLSelection(primaryTTML: trimmed, alternatives: [])
+                let locale = TTMLLanguageDetector.language(in: trimmed)
+                let normalized = locale.map {
+                    LyricsLocaleMatcher.normalizeChineseScript(
+                        in: trimmed,
+                        selectedLocale: $0,
+                        preferredLanguages: preferredLanguages
+                    )
+                } ?? trimmed
+                return LocalizedTTMLSelection(
+                    primaryTTML: normalized,
+                    locale: locale,
+                    alternatives: []
+                )
             }
             guard let data = trimmed.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
@@ -240,27 +256,26 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
         case .localized(let values):
             localizations = values
         }
-        let preferred = Locale.preferredLanguages
-        var selectedKey: String?
-        for language in preferred {
-            if localizations[language] != nil {
-                selectedKey = language
-                break
-            }
-            let base = language.split(separator: "-").first.map(String.init)
-            if let base,
-               let match = localizations.keys.sorted().first(where: { $0.hasPrefix(base) }) {
-                selectedKey = match
-                break
-            }
-        }
+        let selectedKey = LyricsLocaleMatcher.bestKey(
+            in: localizations.keys,
+            preferredLanguages: preferredLanguages
+        )
         guard let key = selectedKey ?? localizations.keys.sorted().first,
               let primary = localizations[key] else { return nil }
+        let normalizedPrimary = LyricsLocaleMatcher.normalizeChineseScript(
+            in: primary,
+            selectedLocale: key,
+            preferredLanguages: preferredLanguages
+        )
         let alternatives = localizations
             .filter { $0.key != key && $0.value != primary }
             .sorted { $0.key < $1.key }
             .map { LocalizedTTMLAlternative(locale: $0.key, ttml: $0.value) }
-        return LocalizedTTMLSelection(primaryTTML: primary, alternatives: alternatives)
+        return LocalizedTTMLSelection(
+            primaryTTML: normalizedPrimary,
+            locale: key,
+            alternatives: alternatives
+        )
     }
 
     private func enrich(
@@ -513,7 +528,146 @@ private struct ComparableMetadataText {
 
 private struct LocalizedTTMLSelection {
     let primaryTTML: String
+    let locale: String?
     let alternatives: [LocalizedTTMLAlternative]
+
+    init(
+        primaryTTML: String,
+        locale: String? = nil,
+        alternatives: [LocalizedTTMLAlternative]
+    ) {
+        self.primaryTTML = primaryTTML
+        self.locale = locale
+        self.alternatives = alternatives
+    }
+}
+
+private enum LyricsLocaleMatcher {
+    private static let traditionalToSimplified = StringTransform("Traditional-Simplified")
+    private static let simplifiedToTraditional = StringTransform("Simplified-Traditional")
+
+    static func bestKey<S: Sequence>(
+        in keys: S,
+        preferredLanguages: [String]
+    ) -> String? where S.Element == String {
+        let sortedKeys = keys.sorted()
+        let candidates = sortedKeys.map { ($0, LanguageTag($0)) }
+
+        for preferredIdentifier in preferredLanguages {
+            let preferred = LanguageTag(preferredIdentifier)
+            guard !preferred.language.isEmpty else { continue }
+            let matches = candidates.compactMap { key, candidate -> (String, Int)? in
+                guard candidate.language == preferred.language else { return nil }
+                return (key, score(candidate, against: preferred))
+            }
+            if let best = matches.max(by: {
+                $0.1 == $1.1 ? $0.0 > $1.0 : $0.1 < $1.1
+            }) {
+                return best.0
+            }
+        }
+        return nil
+    }
+
+    static func normalizeChineseScript(
+        in ttml: String,
+        selectedLocale: String,
+        preferredLanguages: [String]
+    ) -> String {
+        let selected = LanguageTag(selectedLocale)
+        guard selected.language == "zh",
+              let preferred = preferredLanguages
+                .map(LanguageTag.init)
+                .first(where: { $0.language == "zh" }),
+              let script = preferred.inferredChineseScript else { return ttml }
+
+        let transform = script == "hans"
+            ? traditionalToSimplified
+            : simplifiedToTraditional
+        return ttml.applyingTransform(transform, reverse: false) ?? ttml
+    }
+
+    private static func score(_ candidate: LanguageTag, against preferred: LanguageTag) -> Int {
+        if candidate.normalized == preferred.normalized { return 1_000 }
+
+        var score = 100
+        let preferredScript = preferred.inferredChineseScript ?? preferred.script
+        let candidateScript = candidate.inferredChineseScript ?? candidate.script
+        if let preferredScript {
+            if candidateScript == preferredScript {
+                score += 300
+            } else if candidateScript == nil {
+                score += 100
+            } else {
+                score -= 300
+            }
+        } else if candidateScript == nil {
+            score += 100
+        }
+        if let preferredRegion = preferred.region, candidate.region == preferredRegion {
+            score += 40
+        }
+        return score
+    }
+
+    private struct LanguageTag {
+        let normalized: String
+        let language: String
+        let script: String?
+        let region: String?
+
+        init(_ identifier: String) {
+            normalized = identifier.replacingOccurrences(of: "_", with: "-").lowercased()
+            let parts = normalized.split(separator: "-").map(String.init)
+            language = parts.first ?? ""
+            script = parts.dropFirst().first {
+                $0.count == 4 && $0.allSatisfy(\.isLetter)
+            }
+            region = parts.dropFirst().first {
+                ($0.count == 2 && $0.allSatisfy(\.isLetter))
+                    || ($0.count == 3 && $0.allSatisfy(\.isNumber))
+            }
+        }
+
+        var inferredChineseScript: String? {
+            guard language == "zh" else { return nil }
+            if script == "hans" || script == "hant" { return script }
+            switch region {
+            case "cn", "sg", "my": return "hans"
+            case "tw", "hk", "mo": return "hant"
+            default: return nil
+            }
+        }
+    }
+}
+
+private enum TTMLLanguageDetector {
+    static func language(in ttml: String) -> String? {
+        guard let data = ttml.data(using: .utf8) else { return nil }
+        let delegate = RootElementDelegate()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        parser.shouldResolveExternalEntities = false
+        _ = parser.parse()
+        return delegate.language
+    }
+
+    private final class RootElementDelegate: NSObject, XMLParserDelegate {
+        var language: String?
+        private var foundRoot = false
+
+        func parser(
+            _ parser: XMLParser,
+            didStartElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName qName: String?,
+            attributes attributeDict: [String: String] = [:]
+        ) {
+            guard !foundRoot else { return }
+            foundRoot = true
+            language = attributeDict["xml:lang"] ?? attributeDict["lang"]
+        }
+    }
 }
 
 private struct LocalizedTTMLAlternative {
