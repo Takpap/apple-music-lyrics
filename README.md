@@ -30,6 +30,7 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 - Per-display window positions, configurable Space behavior, and native macOS 26 glass
 - Global shortcuts: `Control-Option-L` to show/hide and `Control-Option-K` to lock/unlock
 - Nearby-line preview in the status item menu
+- Automatic daily update checks through GitHub Releases, plus a manual check
 - Automatic cache rescanning after track changes
 - No third-party packages, analytics, account-token extraction, or lyrics requests
 

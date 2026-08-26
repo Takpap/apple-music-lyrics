@@ -28,6 +28,7 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 - 按显示器记忆窗口位置，可配置空间策略，并适配 macOS 26 Liquid Glass
 - 全局快捷键：`Control-Option-L` 显示/隐藏，`Control-Option-K` 锁定/解锁
 - 在状态项菜单中预览当前歌词附近的内容
+- 通过 GitHub Releases 每日自动检查更新，也可从菜单手动检查
 - 切换歌曲后自动重新扫描歌词缓存
 - 无第三方依赖、无数据分析、不会提取账户令牌，也不会主动请求歌词
 

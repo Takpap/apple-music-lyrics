@@ -56,6 +56,8 @@ enum AppPreferences {
         static let framesByDisplay = "floatingLyrics.framesByDisplay"
         static let lastDisplay = "floatingLyrics.lastDisplay"
         static let immersiveHeight = "floatingLyrics.immersiveHeight"
+        static let lastUpdateCheck = "updates.lastCheck"
+        static let lastNotifiedVersion = "updates.lastNotifiedVersion"
     }
 
     static var floatingLyricsVisible: Bool {
@@ -127,6 +129,16 @@ enum AppPreferences {
             return max(220, UserDefaults.standard.double(forKey: Key.immersiveHeight))
         }
         set { UserDefaults.standard.set(max(220, newValue), forKey: Key.immersiveHeight) }
+    }
+
+    static var lastUpdateCheck: Date? {
+        get { UserDefaults.standard.object(forKey: Key.lastUpdateCheck) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Key.lastUpdateCheck) }
+    }
+
+    static var lastNotifiedUpdateVersion: String? {
+        get { UserDefaults.standard.string(forKey: Key.lastNotifiedVersion) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.lastNotifiedVersion) }
     }
 
     private static func defaultedBool(_ key: String, default value: Bool) -> Bool {

@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let menuBar = MenuBarController()
     private let floating = FloatingLyricsController()
@@ -7,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let lyricsService = LyricsService()
     private let playbackController = MusicPlaybackController()
     private let globalHotKeys = GlobalHotKeyController()
+    private let updateService = UpdateService()
     private let logger = DiagnosticLogger.shared
 
     private var currentTrackKey: String?
@@ -19,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastDisplayedLine: String?
     private var lastTrackKeyForUI: String?
     private var lastLoggedPlaybackState: String?
+    private var updateTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logger.startSession()
@@ -27,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menuBar.onRefreshLyrics = { [weak self] in
             self?.forceRefreshLyrics()
+        }
+        menuBar.onCheckForUpdates = { [weak self] in
+            self?.checkForUpdates(manual: true)
         }
         menuBar.onToggleFloating = { [weak self] in
             self?.floating.toggle()
@@ -92,11 +98,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.apply(status: .idle)
         floating.apply(status: .idle)
         playbackMonitor.start()
+        checkForUpdates(manual: false)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         logger.info("Application terminating")
+        updateTask?.cancel()
         playbackMonitor.stop()
+    }
+
+    // MARK: - Updates
+
+    private func checkForUpdates(manual: Bool) {
+        if !manual,
+           let lastCheck = AppPreferences.lastUpdateCheck,
+           Date().timeIntervalSince(lastCheck) < 24 * 60 * 60 {
+            return
+        }
+        guard updateTask == nil else { return }
+
+        if manual { menuBar.setCheckingForUpdates(true) }
+        updateTask = Task { [weak self, updateService] in
+            do {
+                let update = try await updateService.checkForUpdate()
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                AppPreferences.lastUpdateCheck = Date()
+                self.updateTask = nil
+                self.menuBar.setCheckingForUpdates(false)
+                if let update {
+                    let version = update.version.description
+                    if manual || AppPreferences.lastNotifiedUpdateVersion != version {
+                        AppPreferences.lastNotifiedUpdateVersion = version
+                        self.present(update: update)
+                    }
+                } else if manual {
+                    self.presentMessage(
+                        title: "已是最新版本",
+                        message: "当前安装的 Apple Music Lyrics 已是最新版本。"
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                self.updateTask = nil
+                self.menuBar.setCheckingForUpdates(false)
+                self.logger.warning("Update check failed: \(error.localizedDescription)")
+                if manual {
+                    self.presentMessage(
+                        title: "无法检查更新",
+                        message: error.localizedDescription
+                    )
+                }
+            }
+        }
+    }
+
+    private func present(update: AppUpdate) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "发现新版本 \(update.version)"
+        alert.informativeText = "可以从 GitHub 下载新版安装镜像，下载完成后会验证 SHA-256 校验值。"
+        alert.addButton(withTitle: "下载更新")
+        alert.addButton(withTitle: "查看发布页")
+        alert.addButton(withTitle: "稍后")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            download(update)
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.open(update.releasePageURL)
+        default:
+            break
+        }
+    }
+
+    private func download(_ update: AppUpdate) {
+        menuBar.setCheckingForUpdates(true)
+        updateTask = Task { [weak self, updateService] in
+            do {
+                let fileURL = try await updateService.download(update)
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                self.updateTask = nil
+                self.menuBar.setCheckingForUpdates(false)
+                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                self.presentMessage(
+                    title: "更新已下载",
+                    message: "安装镜像已通过完整性校验并保存到“下载”文件夹。"
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                self.updateTask = nil
+                self.menuBar.setCheckingForUpdates(false)
+                self.logger.warning("Update download failed: \(error.localizedDescription)")
+                self.presentMessage(title: "下载更新失败", message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func presentMessage(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     // MARK: - Playback updates

@@ -7,6 +7,11 @@ final class MenuBarController: NSObject {
     private let karaokeTitleView = KaraokeStatusTitleView()
     private let playerItem = NSMenuItem()
     private let playerView = MenuPlayerView()
+    private let checkForUpdatesItem = NSMenuItem(
+        title: "检查更新…",
+        action: #selector(checkForUpdates),
+        keyEquivalent: ""
+    )
 
     private let floatingItem = NSMenuItem(
         title: "浮动歌词",
@@ -28,6 +33,7 @@ final class MenuBarController: NSObject {
     private var floatingVisible = false
 
     var onRefreshLyrics: (() -> Void)?
+    var onCheckForUpdates: (() -> Void)?
     var onToggleFloating: (() -> Void)?
     var onToggleFloatingLock: (() -> Void)?
     var onToggleFloatingClickThrough: (() -> Void)?
@@ -45,6 +51,7 @@ final class MenuBarController: NSObject {
         lockFloatingItem.target = self
         lockFloatingItem.keyEquivalentModifierMask = [.control, .option]
         clickThroughItem.target = self
+        checkForUpdatesItem.target = self
         playerItem.view = playerView
         playerView.onSeek = { [weak self] position in self?.onSeek?(position) }
         playerView.onPreviousTrack = { [weak self] in self?.onPreviousTrack?() }
@@ -75,6 +82,11 @@ final class MenuBarController: NSObject {
     func setFloatingInteraction(locked: Bool, clickThrough: Bool) {
         lockFloatingItem.state = locked ? .on : .off
         clickThroughItem.state = clickThrough ? .on : .off
+    }
+
+    func setCheckingForUpdates(_ checking: Bool) {
+        checkForUpdatesItem.title = checking ? "正在检查更新…" : "检查更新…"
+        checkForUpdatesItem.isEnabled = !checking
     }
 
     private func configureStatusItem() {
@@ -139,6 +151,7 @@ final class MenuBarController: NSObject {
 
         diagnostic.submenu = diagnosticMenu
         menu.addItem(diagnostic)
+        menu.addItem(checkForUpdatesItem)
 
         menu.addItem(.separator())
 
@@ -223,10 +236,10 @@ final class MenuBarController: NSObject {
         } else if screenWidth <= 1800 {
             maximumWidth = 180
         } else {
-            maximumWidth = 260
+            maximumWidth = 200
         }
-        // A stable width keeps the entire status item from jumping whenever
-        // consecutive lyric lines have noticeably different lengths.
+        // Keep the width stable between lines without reserving excessive
+        // menu bar space for short lyrics. Longer lines scroll within the view.
         statusItem.length = maximumWidth
         if button.attributedTitle.string != displayText {
             button.attributedTitle = NSAttributedString(
@@ -252,6 +265,10 @@ final class MenuBarController: NSObject {
 
     @objc private func refreshLyrics() {
         onRefreshLyrics?()
+    }
+
+    @objc private func checkForUpdates() {
+        onCheckForUpdates?()
     }
 
     @objc private func toggleFloating() {
