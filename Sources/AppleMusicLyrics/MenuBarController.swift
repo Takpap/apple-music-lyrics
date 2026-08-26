@@ -41,6 +41,7 @@ final class MenuBarController: NSObject {
     var onPreviousTrack: (() -> Void)?
     var onTogglePlayPause: (() -> Void)?
     var onNextTrack: (() -> Void)?
+    var onOpenMusic: (() -> Void)?
     var onQuit: (() -> Void)?
 
     override init() {
@@ -57,6 +58,7 @@ final class MenuBarController: NSObject {
         playerView.onPreviousTrack = { [weak self] in self?.onPreviousTrack?() }
         playerView.onTogglePlayPause = { [weak self] in self?.onTogglePlayPause?() }
         playerView.onNextTrack = { [weak self] in self?.onNextTrack?() }
+        playerView.onOpenMusic = { [weak self] in self?.onOpenMusic?() }
         configureStatusItem()
         rebuildMenu()
     }
@@ -385,19 +387,27 @@ private final class MenuPlayerView: NSView {
     var onPreviousTrack: (() -> Void)?
     var onTogglePlayPause: (() -> Void)?
     var onNextTrack: (() -> Void)?
+    var onOpenMusic: (() -> Void)?
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 410, height: 150)
+        NSSize(width: 410, height: 126)
     }
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 410, height: 150))
+        super.init(frame: NSRect(x: 0, y: 0, width: 410, height: 126))
         configure()
         update(track: nil, message: "未播放歌曲")
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for view in [artworkView, titleLabel, subtitleLabel] {
+            addCursorRect(convert(view.bounds, from: view), cursor: .pointingHand)
+        }
     }
 
     deinit {
@@ -421,6 +431,15 @@ private final class MenuPlayerView: NSView {
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [artworkView, titleLabel, subtitleLabel] {
+            view.addGestureRecognizer(
+                NSClickGestureRecognizer(target: self, action: #selector(openMusic))
+            )
+            view.toolTip = "打开 Apple Music"
+            view.setAccessibilityRole(.button)
+            view.setAccessibilityLabel("打开 Apple Music")
+        }
 
         configureButton(
             previousButton,
@@ -478,25 +497,25 @@ private final class MenuPlayerView: NSView {
         addSubview(remainingLabel)
 
         NSLayoutConstraint.activate([
-            artworkView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            artworkView.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            artworkView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            artworkView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            artworkView.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            artworkView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
             artworkView.widthAnchor.constraint(equalTo: artworkView.heightAnchor),
 
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 14),
-            titleLabel.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            titleLabel.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 14),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
 
             controls.centerXAnchor.constraint(equalTo: slider.centerXAnchor),
-            controls.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 5),
-            controls.heightAnchor.constraint(equalToConstant: 32),
+            controls.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 1),
+            controls.heightAnchor.constraint(equalToConstant: 30),
 
-            slider.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 16),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            slider.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
+            slider.leadingAnchor.constraint(equalTo: artworkView.trailingAnchor, constant: 14),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            slider.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20),
 
             elapsedLabel.leadingAnchor.constraint(equalTo: slider.leadingAnchor),
             elapsedLabel.topAnchor.constraint(equalTo: slider.bottomAnchor),
@@ -624,6 +643,10 @@ private final class MenuPlayerView: NSView {
 
     @objc private func previousTrack(_ sender: Any?) {
         onPreviousTrack?()
+    }
+
+    @objc private func openMusic(_ sender: Any?) {
+        onOpenMusic?()
     }
 
     @objc private func togglePlayPause(_ sender: Any?) {

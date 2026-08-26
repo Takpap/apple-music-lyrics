@@ -63,6 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.playbackMonitor.sampleNow()
             }
         }
+        menuBar.onOpenMusic = { [weak self] in
+            self?.openMusic()
+        }
         menuBar.onQuit = {
             NSApp.terminate(nil)
         }
@@ -206,6 +209,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = message
         alert.addButton(withTitle: "好")
         alert.runModal()
+    }
+
+    private func openMusic() {
+        guard let applicationURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.apple.Music"
+        ) else {
+            logger.warning("Unable to locate Music.app")
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(
+            at: applicationURL,
+            configuration: configuration
+        ) { [logger] _, error in
+            if let error {
+                logger.warning("Unable to open Music.app: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Playback updates
