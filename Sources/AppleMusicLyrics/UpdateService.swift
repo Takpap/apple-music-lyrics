@@ -163,13 +163,13 @@ final class UpdateService: @unchecked Sendable {
 
     static func expectedSHA256(in contents: String, for assetName: String) -> String? {
         for line in contents.components(separatedBy: .newlines) {
-            let fields = line.split(whereSeparator: \Character.isWhitespace)
+            let fields = line.split(whereSeparator: { $0.isWhitespace })
             guard fields.count >= 2 else { continue }
             let hash = String(fields[0])
             let name = fields.dropFirst().joined(separator: " ").trimmingPrefix("*")
             if name == assetName,
                hash.count == 64,
-               hash.allSatisfy(\.isHexDigit) {
+               hash.allSatisfy({ $0.isHexDigit }) {
                 return hash.lowercased()
             }
         }
