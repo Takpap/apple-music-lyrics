@@ -56,9 +56,14 @@ enum AppPreferences {
         static let framesByDisplay = "floatingLyrics.framesByDisplay"
         static let lastDisplay = "floatingLyrics.lastDisplay"
         static let immersiveHeight = "floatingLyrics.immersiveHeight"
+        static let menuBarActiveColor = "menuBarLyrics.activeColor"
+        static let menuBarInactiveColor = "menuBarLyrics.inactiveColor"
         static let lastUpdateCheck = "updates.lastCheck"
         static let lastNotifiedVersion = "updates.lastNotifiedVersion"
     }
+
+    static let defaultMenuBarLyricsActiveColor = NSColor.labelColor.withAlphaComponent(0.96)
+    static let defaultMenuBarLyricsInactiveColor = NSColor.labelColor.withAlphaComponent(0.42)
 
     static var floatingLyricsVisible: Bool {
         get { defaultedBool(Key.floatingVisible, default: true) }
@@ -131,6 +136,21 @@ enum AppPreferences {
         set { UserDefaults.standard.set(max(220, newValue), forKey: Key.immersiveHeight) }
     }
 
+    static var menuBarLyricsActiveColor: NSColor {
+        get { color(Key.menuBarActiveColor, default: defaultMenuBarLyricsActiveColor) }
+        set { setColor(newValue, forKey: Key.menuBarActiveColor) }
+    }
+
+    static var menuBarLyricsInactiveColor: NSColor {
+        get { color(Key.menuBarInactiveColor, default: defaultMenuBarLyricsInactiveColor) }
+        set { setColor(newValue, forKey: Key.menuBarInactiveColor) }
+    }
+
+    static func resetMenuBarLyricsColors() {
+        [Key.menuBarActiveColor, Key.menuBarInactiveColor]
+            .forEach(UserDefaults.standard.removeObject(forKey:))
+    }
+
     static var lastUpdateCheck: Date? {
         get { UserDefaults.standard.object(forKey: Key.lastUpdateCheck) as? Date }
         set { UserDefaults.standard.set(newValue, forKey: Key.lastUpdateCheck) }
@@ -154,5 +174,34 @@ enum AppPreferences {
         guard let rawValue = UserDefaults.standard.string(forKey: key),
               let result = T(rawValue: rawValue) else { return value }
         return result
+    }
+
+    private static func color(_ key: String, default defaultColor: NSColor) -> NSColor {
+        storedColor(key) ?? defaultColor
+    }
+
+    private static func storedColor(_ key: String) -> NSColor? {
+        guard let stored = UserDefaults.standard.array(forKey: key), stored.count == 4 else {
+            return nil
+        }
+        let components = stored.compactMap { ($0 as? NSNumber)?.doubleValue }
+        guard components.count == 4,
+              components.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else {
+            return nil
+        }
+        return NSColor(
+            srgbRed: CGFloat(components[0]),
+            green: CGFloat(components[1]),
+            blue: CGFloat(components[2]),
+            alpha: CGFloat(components[3])
+        )
+    }
+
+    private static func setColor(_ color: NSColor, forKey key: String) {
+        guard let color = color.usingColorSpace(.sRGB) else { return }
+        let components = [color.redComponent, color.greenComponent, color.blueComponent, color.alphaComponent]
+            .map(Double.init)
+        guard components.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else { return }
+        UserDefaults.standard.set(components, forKey: key)
     }
 }
