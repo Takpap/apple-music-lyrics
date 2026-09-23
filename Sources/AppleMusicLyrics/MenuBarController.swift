@@ -1,6 +1,32 @@
 import AppKit
 import QuartzCore
 
+private enum MenuBarLyricsColorPreference: Int, CaseIterable {
+    case active
+    case inactive
+
+    var title: String {
+        switch self {
+        case .active: return "高亮歌词颜色…"
+        case .inactive: return "未高亮歌词颜色…"
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .active: return AppPreferences.menuBarLyricsActiveColor
+        case .inactive: return AppPreferences.menuBarLyricsInactiveColor
+        }
+    }
+
+    func save(_ color: NSColor) {
+        switch self {
+        case .active: AppPreferences.menuBarLyricsActiveColor = color
+        case .inactive: AppPreferences.menuBarLyricsInactiveColor = color
+        }
+    }
+}
+
 final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
@@ -31,6 +57,7 @@ final class MenuBarController: NSObject {
 
     private var diagnosticLogWindow: NSWindow?
     private var floatingVisible = false
+    private var selectedColorPreference: MenuBarLyricsColorPreference?
 
     var onRefreshLyrics: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
@@ -123,6 +150,27 @@ final class MenuBarController: NSObject {
         )
         refresh.target = self
         menu.addItem(refresh)
+
+        menu.addItem(.separator())
+        for preference in MenuBarLyricsColorPreference.allCases {
+            let item = NSMenuItem(
+                title: preference.title,
+                action: #selector(showLyricsColorPanel(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = preference.rawValue
+            menu.addItem(item)
+        }
+        let resetColors = NSMenuItem(
+            title: "恢复默认歌词颜色",
+            action: #selector(resetLyricsColors),
+            keyEquivalent: ""
+        )
+        resetColors.target = self
+        menu.addItem(resetColors)
+
+        menu.addItem(.separator())
 
         let diagnostic = NSMenuItem(title: "诊断日志", action: nil, keyEquivalent: "")
         let diagnosticMenu = NSMenu(title: "诊断日志")
@@ -267,6 +315,33 @@ final class MenuBarController: NSObject {
 
     @objc private func refreshLyrics() {
         onRefreshLyrics?()
+    }
+
+    @objc private func showLyricsColorPanel(_ sender: NSMenuItem) {
+        guard let preference = MenuBarLyricsColorPreference(rawValue: sender.tag) else { return }
+        selectedColorPreference = preference
+        let colorPanel = NSColorPanel.shared
+        colorPanel.showsAlpha = true
+        colorPanel.isContinuous = true
+        colorPanel.color = preference.color
+        colorPanel.setTarget(self)
+        colorPanel.setAction(#selector(changeLyricsColor(_:)))
+        NSApp.activate(ignoringOtherApps: true)
+        colorPanel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func changeLyricsColor(_ sender: NSColorPanel) {
+        guard let selectedColorPreference else { return }
+        selectedColorPreference.save(sender.color)
+        karaokeTitleView.reloadColors()
+    }
+
+    @objc private func resetLyricsColors() {
+        AppPreferences.resetMenuBarLyricsColors()
+        karaokeTitleView.reloadColors()
+        if let selectedColorPreference {
+            NSColorPanel.shared.color = selectedColorPreference.color
+        }
     }
 
     @objc private func checkForUpdates() {
@@ -704,6 +779,8 @@ private final class KaraokeStatusTitleView: NSView {
     private var lastDrawTime: CFTimeInterval = 0
     private var prefixWidth: CGFloat = 0
     private var previousLine: PreviousLine?
+    private var activeColor = AppPreferences.menuBarLyricsActiveColor
+    private var inactiveColor = AppPreferences.menuBarLyricsInactiveColor
 
     override var isFlipped: Bool { true }
 
@@ -770,6 +847,12 @@ private final class KaraokeStatusTitleView: NSView {
         currentLineID = nil
         renderedOriginX = nil
         previousLine = nil
+    }
+
+    func reloadColors() {
+        activeColor = AppPreferences.menuBarLyricsActiveColor
+        inactiveColor = AppPreferences.menuBarLyricsInactiveColor
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -854,7 +937,7 @@ private final class KaraokeStatusTitleView: NSView {
             string: text,
             attributes: [
                 .font: font,
-                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.42),
+                .foregroundColor: inactiveColor,
                 .paragraphStyle: paragraph
             ]
         )
@@ -862,7 +945,7 @@ private final class KaraokeStatusTitleView: NSView {
             string: text,
             attributes: [
                 .font: font,
-                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.96),
+                .foregroundColor: activeColor,
                 .paragraphStyle: paragraph
             ]
         )
