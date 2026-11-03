@@ -58,6 +58,8 @@ enum AppPreferences {
         static let immersiveHeight = "floatingLyrics.immersiveHeight"
         static let menuBarActiveColor = "menuBarLyrics.activeColor"
         static let menuBarInactiveColor = "menuBarLyrics.inactiveColor"
+        static let exportIncludeTranslation = "export.includeTranslation"
+        static let exportIncludeTransliteration = "export.includeTransliteration"
         static let lastUpdateCheck = "updates.lastCheck"
         static let lastNotifiedVersion = "updates.lastNotifiedVersion"
     }
@@ -116,6 +118,23 @@ enum AppPreferences {
     static var floatingLyricsShowTransliteration: Bool {
         get { defaultedBool(Key.showTransliteration, default: true) }
         set { UserDefaults.standard.set(newValue, forKey: Key.showTransliteration) }
+    }
+
+    static var exportIncludeTranslation: Bool {
+        get { defaultedBool(Key.exportIncludeTranslation, default: true) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.exportIncludeTranslation) }
+    }
+
+    static var exportIncludeTransliteration: Bool {
+        get { defaultedBool(Key.exportIncludeTransliteration, default: false) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.exportIncludeTransliteration) }
+    }
+
+    static var lyricsExportOptions: LyricsExportOptions {
+        LyricsExportOptions(
+            includeTranslation: exportIncludeTranslation,
+            includeTransliteration: exportIncludeTransliteration
+        )
     }
 
     static var floatingLyricsFramesByDisplay: [String: String] {

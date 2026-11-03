@@ -28,6 +28,7 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 - 按显示器记忆窗口位置，可配置空间策略，并适配 macOS 26 Liquid Glass
 - 全局快捷键：`Control-Option-L` 显示/隐藏，`Control-Option-K` 锁定/解锁
 - 在状态项菜单中预览当前歌词附近的内容
+- 将当前歌词导出为 LRC（逐行/逐字）、SRT 或纯文本，可选包含翻译和音译
 - 通过 GitHub Releases 每日自动检查更新，也可从菜单手动检查
 - 切换歌曲后自动重新扫描歌词缓存
 - 无第三方依赖、无数据分析、不会提取账户令牌，也不会主动请求歌词
@@ -181,6 +182,7 @@ open "/Applications/Apple Music Lyrics.app"
 | Lock / Unlock Floating Lyrics | 禁止移动和缩放浮窗（全局 `Control-Option-K`） |
 | Click Through Floating Lyrics | 让鼠标操作穿透到下层应用；按住 `Option` 可临时操作浮窗 |
 | Refresh Lyrics | 重新扫描 Music.app 的本地歌词缓存 |
+| 导出歌词 | 将当前歌词保存为 LRC（逐行/逐字）、SRT 或 TXT，或拷贝到剪贴板；可选包含翻译和音译 |
 | Diagnostic Log | 查看、复制诊断日志，或在 Finder 中显示日志文件 |
 | Quit Apple Music Lyrics | 退出应用 |
 

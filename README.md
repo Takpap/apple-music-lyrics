@@ -30,6 +30,7 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 - Per-display window positions, configurable Space behavior, and native macOS 26 glass
 - Global shortcuts: `Control-Option-L` to show/hide and `Control-Option-K` to lock/unlock
 - Nearby-line preview in the status item menu
+- Export the current lyrics as LRC (line- or word-timed), SRT, or plain text, optionally with translations and transliterations
 - Automatic daily update checks through GitHub Releases, plus a manual check
 - Automatic cache rescanning after track changes
 - No third-party packages, analytics, account-token extraction, or lyrics requests
@@ -191,6 +192,7 @@ or upgraded.
 | Lock / Unlock Floating Lyrics | Prevent moving and resizing (`Control-Option-K` globally) |
 | Click Through Floating Lyrics | Pass pointer input to the app underneath; hold `Option` to interact temporarily |
 | Refresh Lyrics | Rescan Music.app's local lyrics cache |
+| Export Lyrics | Save the current lyrics as LRC (line/word), SRT, or TXT, or copy them; optionally include translations and transliterations |
 | Diagnostic Log | View, copy, or reveal the local diagnostic log in Finder |
 | Quit Apple Music Lyrics | Exit the app |
 

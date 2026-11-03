@@ -1,0 +1,35 @@
+Apple Music Lyrics - 安装与权限说明
+====================================
+
+安装
+----
+1. 将 Apple Music Lyrics.app 拖到 Applications 文件夹。
+2. 从“应用程序”文件夹打开 Apple Music Lyrics。
+
+如果 macOS 阻止打开
+-------------------
+本项目的发布版本使用 ad-hoc 签名，尚未经过 Apple 公证。
+
+1. 尝试打开应用一次，然后关闭系统警告。
+2. 打开“系统设置 > 隐私与安全性”。
+3. 向下滚动到“安全性”，找到 Apple Music Lyrics 被阻止的提示。
+4. 点击“仍要打开”，然后确认“打开”。
+
+如果没有出现“仍要打开”，也可以在 Finder 中按住 Control 点击应用，选择“打开”。
+请仅对从本项目官方 GitHub Release 下载的应用执行这些操作。
+
+允许读取 Music 播放信息
+----------------------
+首次启动并播放歌曲时，请在系统授权窗口中允许 Apple Music Lyrics 控制 Music。
+
+如果没有出现授权窗口，或播放歌曲时显示 Error，请检查：
+
+系统设置 > 隐私与安全性 > 自动化 > Apple Music Lyrics > Music
+
+应用不需要“完全磁盘访问”权限，也不会读取 Apple 账户凭据。
+
+English
+-------
+Drag Apple Music Lyrics.app to Applications. If macOS blocks the app, open
+System Settings > Privacy & Security and choose Open Anyway. On first launch,
+allow Apple Music Lyrics to control Music under Privacy & Security > Automation.
