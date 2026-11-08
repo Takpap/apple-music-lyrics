@@ -101,7 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.apply(status: .idle)
         floating.apply(status: .idle)
         playbackMonitor.start()
+#if !DEBUG
         checkForUpdates(manual: false)
+#endif
     }
 
     func applicationWillTerminate(_ notification: Notification) {
