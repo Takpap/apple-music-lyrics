@@ -113,6 +113,59 @@ final class UserLyricsStore: @unchecked Sendable {
         return url
     }
 
+    /// Saves corrected translations for individual lines, keeping every other
+    /// line of the file as it is. An empty translation clears the override, so
+    /// the automatic (Apple or on-device) translation is used again.
+    func setTranslations(_ changes: [(original: String, translation: String)], for track: TrackInfo) throws {
+        let changes = changes.filter { !Self.normalizeKey($0.original).isEmpty }
+        guard !changes.isEmpty else { return }
+        let url = translationsFileURL(for: track)
+        var lines: [String]
+        if let existing = Self.readText(url) {
+            lines = existing.components(separatedBy: "\n")
+            if lines.last == "" { lines.removeLast() }
+        } else {
+            try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            lines = [
+                "# Translations for: \(track.displayName)",
+                "# Format: one lyric per line as   original text = your translation",
+                "# Lines starting with # are comments. Leave the translation empty to use the automatic one.",
+                ""
+            ]
+        }
+        for change in changes {
+            let original = change.original
+                .split(whereSeparator: { $0.isNewline })
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespaces)
+            let translation = change.translation
+                .split(whereSeparator: { $0.isNewline })
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespaces)
+            let key = Self.normalizeKey(original)
+            let entry = "\(original) = \(translation)"
+            if let index = lines.firstIndex(where: { Self.entryKey(of: $0) == key }) {
+                lines[index] = entry
+            } else {
+                lines.append(entry)
+            }
+        }
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// The normalized original text of one `original = translation` row.
+    private static func entryKey(of row: String) -> String? {
+        let trimmed = row.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+        if let range = row.range(of: " = ") {
+            return normalizeKey(String(row[..<range.lowerBound]))
+        }
+        if let equals = row.firstIndex(of: "=") {
+            return normalizeKey(String(row[..<equals]))
+        }
+        return nil
+    }
+
     // MARK: - Helpers
 
     static func baseName(for track: TrackInfo) -> String {

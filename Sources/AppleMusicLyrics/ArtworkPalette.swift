@@ -1,0 +1,128 @@
+import AppKit
+import CoreImage
+import SwiftUI
+
+/// Colours and a pre-blurred, darkened copy of the artwork used for the
+/// animated background, computed once per track.
+struct ArtworkPalette: Equatable {
+    var colors: [NSColor]
+    /// Small, heavily blurred artwork; Core Animation scales it up, so the
+    /// background never needs a live blur filter.
+    var backdrop: CGImage?
+
+    static let fallback = ArtworkPalette(
+        colors: [
+            NSColor(calibratedRed: 0.36, green: 0.36, blue: 0.40, alpha: 1),
+            NSColor(calibratedRed: 0.27, green: 0.27, blue: 0.31, alpha: 1),
+            NSColor(calibratedRed: 0.42, green: 0.40, blue: 0.44, alpha: 1),
+            NSColor(calibratedRed: 0.22, green: 0.22, blue: 0.26, alpha: 1),
+            NSColor(calibratedRed: 0.32, green: 0.31, blue: 0.36, alpha: 1)
+        ],
+        backdrop: nil
+    )
+
+    static func == (lhs: ArtworkPalette, rhs: ArtworkPalette) -> Bool {
+        lhs.colors == rhs.colors && lhs.backdrop === rhs.backdrop
+    }
+
+    var swiftUIColors: [Color] { colors.map { Color(nsColor: $0) } }
+
+    /// Extracts five dominant colours with a small k-means pass over a 24×24
+    /// thumbnail, then tames brightness so white lyrics stay readable.
+    static func make(from image: NSImage) -> ArtworkPalette {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return .fallback
+        }
+        let pixels = samplePixels(cgImage, side: 24)
+        guard pixels.count >= 16 else { return .fallback }
+
+        var centroids = stride(from: 0, to: pixels.count, by: max(1, pixels.count / 5))
+            .prefix(5)
+            .map { pixels[$0] }
+        var assignments = [Int](repeating: 0, count: pixels.count)
+        for _ in 0..<8 {
+            for (index, pixel) in pixels.enumerated() {
+                var best = 0
+                var bestDistance = Double.greatestFiniteMagnitude
+                for (c, centroid) in centroids.enumerated() {
+                    let d = distance(pixel, centroid)
+                    if d < bestDistance { bestDistance = d; best = c }
+                }
+                assignments[index] = best
+            }
+            var sums = [SIMD3<Double>](repeating: .zero, count: centroids.count)
+            var counts = [Int](repeating: 0, count: centroids.count)
+            for (index, pixel) in pixels.enumerated() {
+                sums[assignments[index]] += pixel
+                counts[assignments[index]] += 1
+            }
+            for c in centroids.indices where counts[c] > 0 {
+                centroids[c] = sums[c] / Double(counts[c])
+            }
+        }
+        var counts = [Int](repeating: 0, count: centroids.count)
+        assignments.forEach { counts[$0] += 1 }
+        let ordered = centroids.indices
+            .sorted { counts[$0] > counts[$1] }
+            .map { centroids[$0] }
+
+        let colors = ordered.map { rgb -> NSColor in
+            let color = NSColor(calibratedRed: rgb.x, green: rgb.y, blue: rgb.z, alpha: 1)
+            var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
+            color.usingColorSpace(.deviceRGB)?.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+            return NSColor(
+                calibratedHue: hue,
+                saturation: min(1, saturation * 1.15),
+                brightness: min(0.52, max(0.12, brightness * 0.62)),
+                alpha: 1
+            )
+        }
+        return ArtworkPalette(colors: colors, backdrop: backdrop(cgImage))
+    }
+
+    private static func distance(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double {
+        let d = a - b
+        return (d * d).sum()
+    }
+
+    private static func samplePixels(_ image: CGImage, side: Int) -> [SIMD3<Double>] {
+        var buffer = [UInt8](repeating: 0, count: side * side * 4)
+        guard let context = CGContext(
+            data: &buffer,
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bytesPerRow: side * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return [] }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        var pixels: [SIMD3<Double>] = []
+        pixels.reserveCapacity(side * side)
+        for index in stride(from: 0, to: buffer.count, by: 4) where buffer[index + 3] > 200 {
+            pixels.append(SIMD3(Double(buffer[index]), Double(buffer[index + 1]), Double(buffer[index + 2])) / 255)
+        }
+        return pixels
+    }
+
+    /// A tiny, heavily blurred, darker and more saturated copy, close to the
+    /// tone of Music.app's full-screen background.
+    private static func backdrop(_ image: CGImage) -> CGImage? {
+        let side: CGFloat = 128
+        let ciImage = CIImage(cgImage: image)
+        let scale = side / max(ciImage.extent.width, ciImage.extent.height)
+        let small = ciImage
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .clampedToExtent()
+            .applyingGaussianBlur(sigma: 9)
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 1.55,
+                kCIInputContrastKey: 1.04
+            ])
+            .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -1.15])
+            .cropped(to: CGRect(x: 0, y: 0, width: side, height: side))
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        return context.createCGImage(small, from: small.extent)
+    }
+}

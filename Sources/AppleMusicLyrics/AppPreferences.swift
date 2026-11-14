@@ -62,10 +62,17 @@ enum AppPreferences {
         static let exportIncludeTransliteration = "export.includeTransliteration"
         static let lastUpdateCheck = "updates.lastCheck"
         static let lastNotifiedVersion = "updates.lastNotifiedVersion"
+        static let immersiveOpensFullScreen = "immersiveLyrics.opensFullScreen"
     }
 
     static let defaultMenuBarLyricsActiveColor = NSColor.labelColor.withAlphaComponent(0.96)
     static let defaultMenuBarLyricsInactiveColor = NSColor.labelColor.withAlphaComponent(0.42)
+
+    /// Whether the Apple-style lyrics player takes its own full-screen Space.
+    static var immersiveOpensFullScreen: Bool {
+        get { defaultedBool(Key.immersiveOpensFullScreen, default: true) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.immersiveOpensFullScreen) }
+    }
 
     static var floatingLyricsVisible: Bool {
         get { defaultedBool(Key.floatingVisible, default: true) }

@@ -39,6 +39,11 @@ final class MenuBarController: NSObject {
         keyEquivalent: ""
     )
 
+    private let immersiveItem = NSMenuItem(
+        title: "Full Screen Lyrics",
+        action: #selector(toggleImmersive),
+        keyEquivalent: "f"
+    )
     private let floatingItem = NSMenuItem(
         title: "浮动歌词",
         action: #selector(toggleFloating),
@@ -77,6 +82,7 @@ final class MenuBarController: NSObject {
     var onRefreshLyrics: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
     var onToggleFloating: (() -> Void)?
+    var onToggleImmersive: (() -> Void)?
     var onToggleFloatingLock: (() -> Void)?
     var onToggleFloatingClickThrough: (() -> Void)?
     var onSeek: ((TimeInterval) -> Void)?
@@ -89,6 +95,8 @@ final class MenuBarController: NSObject {
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
+        immersiveItem.target = self
+        immersiveItem.keyEquivalentModifierMask = [.control, .option]
         floatingItem.target = self
         floatingItem.keyEquivalentModifierMask = [.control, .option]
         lockFloatingItem.target = self
@@ -157,6 +165,7 @@ final class MenuBarController: NSObject {
         menu.addItem(playerItem)
         menu.addItem(.separator())
 
+        menu.addItem(immersiveItem)
         menu.addItem(floatingItem)
         menu.addItem(lockFloatingItem)
         menu.addItem(clickThroughItem)
@@ -469,6 +478,10 @@ final class MenuBarController: NSObject {
 
     @objc private func toggleFloating() {
         onToggleFloating?()
+    }
+
+    @objc private func toggleImmersive() {
+        onToggleImmersive?()
     }
 
     @objc private func quit() {

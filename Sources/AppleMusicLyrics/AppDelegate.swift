@@ -2,8 +2,13 @@ import AppKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let toggleImmersiveNotification = Notification.Name("local.applemusiclyrics.toggleFullScreenLyrics")
+
     private let menuBar = MenuBarController()
     private let floating = FloatingLyricsController()
+    private let immersive = ImmersiveLyricsWindowController()
+    private let userStore = UserLyricsStore()
+    private var userFilesWatcher: DirectoryWatcher?
     private let playbackMonitor = PlaybackMonitor()
     private let lyricsService = LyricsService()
     private let playbackController = MusicPlaybackController()
@@ -81,6 +86,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         globalHotKeys.onToggleLock = { [weak self] in
             self?.floating.toggleLocked()
         }
+        globalHotKeys.onToggleImmersive = { [weak self] in
+            self?.immersive.toggle()
+        }
+        menuBar.onToggleImmersive = { [weak self] in
+            self?.immersive.toggle()
+        }
+        configureImmersive()
 
         floating.onVisibilityChanged = { [weak self] visible in
             AppPreferences.floatingLyricsVisible = visible
@@ -101,6 +113,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.apply(status: .idle)
         floating.apply(status: .idle)
         playbackMonitor.start()
+        if CommandLine.arguments.contains("--full-screen-lyrics") {
+            DispatchQueue.main.async { self.immersive.show() }
+        }
+        // A second launch (e.g. `open -n … --args --full-screen-lyrics` from a
+        // Shortcut) asks the running copy to toggle the full-screen lyrics.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Self.toggleImmersiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.immersive.toggle() }
+        }
 #if !DEBUG
         checkForUpdates(manual: false)
 #endif
@@ -289,7 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if isLoadingLyrics {
+        if isLoadingLyrics, currentLyrics.lines.isEmpty, (currentLyrics.plainText ?? "").isEmpty {
             apply(showsLoadingState ? .loadingLyrics(track) : .noLyrics(track))
             return
         }
@@ -341,6 +365,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         playbackMonitor.sampleNow()
     }
 
+    /// Reloads lyrics for the current track without clearing what is shown,
+    /// e.g. after the user saves a translation or lyrics file.
+    private func reloadLyricsQuietly() {
+        guard let track = latestTrack, !isLoadingLyrics else { return }
+        logger.info("User lyrics files changed; reloading quietly")
+        loadLyrics(for: track, showLoading: false)
+    }
+
+    // MARK: - Full-screen lyrics
+
+    private func configureImmersive() {
+        let model = immersive.model
+        model.onSeek = { [weak self] position in
+            self?.playbackController.seek(to: position) {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
+        model.onPreviousTrack = { [weak self] in
+            self?.playbackController.previousTrack { self?.playbackMonitor.sampleNow() }
+        }
+        model.onTogglePlayPause = { [weak self] in
+            self?.playbackController.togglePlayPause { self?.playbackMonitor.sampleNow() }
+        }
+        model.onNextTrack = { [weak self] in
+            self?.playbackController.nextTrack { self?.playbackMonitor.sampleNow() }
+        }
+        model.onRefreshLyrics = { [weak self] in
+            self?.forceRefreshLyrics()
+        }
+        model.onShowCompactLyrics = { [weak self] in
+            self?.immersive.hide()
+            self?.floating.setVisible(true)
+        }
+        model.onRevealLyricsFolder = { [weak self] in
+            self?.revealUserLyricsFolder()
+        }
+        model.onEditTranslations = { [weak self] track, lyrics in
+            self?.editTranslations(for: track, lyrics: lyrics)
+        }
+
+        for directory in [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL] {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        userFilesWatcher = DirectoryWatcher(
+            urls: [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL]
+        ) { [weak self] in
+            self?.reloadLyricsQuietly()
+        }
+    }
+
+    private func editTranslations(for track: TrackInfo, lyrics: LyricsDocument) {
+        do {
+            let url = try userStore.ensureTranslationsFile(for: track, lyrics: lyrics)
+            let textEdit = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.TextEdit")
+            if let textEdit {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                NSWorkspace.shared.open([url], withApplicationAt: textEdit, configuration: configuration)
+            } else {
+                NSWorkspace.shared.open(url)
+            }
+            logger.info("Opened translations file for \(track.displayName)")
+        } catch {
+            logger.error("Could not create translations file: \(error.localizedDescription)")
+        }
+    }
+
+    private func revealUserLyricsFolder() {
+        let folders = [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL]
+        for folder in folders {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        NSWorkspace.shared.activateFileViewerSelecting(folders)
+    }
+
     private func logPlaybackState(_ state: String) {
         guard lastLoggedPlaybackState != state else { return }
         lastLoggedPlaybackState = state
@@ -348,6 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func apply(_ status: AppStatus) {
+        immersive.model.apply(status: status)
         // Skip full menu rebuild when the visible lyric line is unchanged.
         if case .showing(let track, let lyrics, let currentLine) = status {
             if lastTrackKeyForUI == track.identityKey, lastDisplayedLine == currentLine {

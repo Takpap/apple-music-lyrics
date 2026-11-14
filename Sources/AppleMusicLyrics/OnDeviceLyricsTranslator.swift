@@ -9,6 +9,25 @@ struct OnDeviceLyricsTranslator: Sendable {
     private static let targetLanguage = Locale.Language(identifier: "en")
     private let logger = DiagnosticLogger.shared
 
+    /// The lyrics' language when macOS supports translating it to English but
+    /// the language has not been downloaded yet; nil otherwise.
+    static func downloadableSourceLanguage(for document: LyricsDocument) async -> String? {
+        guard #available(macOS 26.0, *), document.isSynced else { return nil }
+        let text = document.lines
+            .filter { $0.translation == nil }
+            .map(\.text)
+            .joined(separator: "\n")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        guard let source = recognizer.dominantLanguage, source != .english else { return nil }
+        let status = await LanguageAvailability().status(
+            from: Locale.Language(identifier: source.rawValue),
+            to: targetLanguage
+        )
+        return status == .supported ? source.rawValue : nil
+    }
+
     func addEnglishTranslations(to document: LyricsDocument) async -> LyricsDocument {
         guard #available(macOS 26.0, *),
               document.isSynced,

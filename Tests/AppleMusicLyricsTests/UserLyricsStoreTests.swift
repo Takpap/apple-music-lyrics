@@ -136,4 +136,31 @@ final class UserLyricsStoreTests: XCTestCase {
         XCTAssertEqual(again, url)
         XCTAssertEqual(try String(contentsOf: url), "mine = yours")
     }
+
+    func testSetTranslationsCreatesFileThenUpdatesOnlyChangedRows() throws {
+        try store.setTranslations([(original: "Dans ma love story", translation: "In my love story")], for: track)
+        XCTAssertEqual(store.translations(for: track), ["dans ma love story": "In my love story"])
+
+        let url = store.translationsFileURL(for: track)
+        var text = try String(contentsOf: url)
+        text += "# keep me\nJe t'attendrai = I'll wait\n"
+        try text.write(to: url, atomically: true, encoding: .utf8)
+
+        try store.setTranslations([
+            (original: "  DANS ma   love story ", translation: "In my own love story"),
+            (original: "Ma love story", translation: "My love\nstory")
+        ], for: track)
+        let saved = try String(contentsOf: url)
+        XCTAssertTrue(saved.contains("# keep me"))
+        XCTAssertEqual(saved.components(separatedBy: "Dans ma love story").count + saved.components(separatedBy: "DANS ma").count, 3)
+        XCTAssertEqual(store.translations(for: track), [
+            "dans ma love story": "In my own love story",
+            "je t'attendrai": "I'll wait",
+            "ma love story": "My love story"
+        ])
+
+        // An empty translation clears the override.
+        try store.setTranslations([(original: "Ma love story", translation: "")], for: track)
+        XCTAssertNil(store.translations(for: track)["ma love story"])
+    }
 }
