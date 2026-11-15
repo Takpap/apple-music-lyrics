@@ -16,7 +16,22 @@ APP_ICON="$ROOT/Resources/AppIcon.icns"
 VERSION="${VERSION:-1.0.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 UNIVERSAL="${UNIVERSAL:-0}"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+
+# Pick a real signing identity when none is given: Developer ID first (runs on
+# any Mac once notarized), then Apple Development (stable identity for this
+# Mac, so Automation/TCC grants survive rebuilds), else ad-hoc.
+if [[ -z "$CODESIGN_IDENTITY" ]]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  for KIND in "Developer ID Application" "Apple Development"; do
+    HASH="$(printf '%s\n' "$IDENTITIES" | awk -v k="\"$KIND:" 'index($0, k) { print $2; exit }')"
+    if [[ -n "$HASH" ]]; then
+      CODESIGN_IDENTITY="$HASH"
+      break
+    fi
+  done
+  CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+fi
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "VERSION must use numeric SemVer form, for example 1.2.3" >&2
@@ -98,20 +113,15 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
 
 echo "→ Signing app with identity: $CODESIGN_IDENTITY"
-/usr/bin/codesign \
-  --force \
-  --options runtime \
-  --entitlements "$ENTITLEMENTS" \
-  --sign "$CODESIGN_IDENTITY" \
-  "$HELPERS/AppleMusicLyricsPlaybackHelper"
-/usr/bin/codesign \
-  --force \
-  --deep \
-  --options runtime \
-  --entitlements "$ENTITLEMENTS" \
-  --sign "$CODESIGN_IDENTITY" \
-  "$APP"
-/usr/bin/codesign --verify --deep --strict "$APP"
+SIGN_ARGS=(--force --options runtime --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY")
+if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
+  SIGN_ARGS+=(--timestamp)
+fi
+# Sign inside-out (no --deep): helper first, then the bundle seals it.
+/usr/bin/codesign "${SIGN_ARGS[@]}" "$HELPERS/AppleMusicLyricsPlaybackHelper"
+/usr/bin/codesign "${SIGN_ARGS[@]}" "$APP"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
+/usr/bin/codesign -dv "$APP" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)=' | head -3
 
 echo "→ Done: $APP"
 echo "  Open with: open \"$APP\""

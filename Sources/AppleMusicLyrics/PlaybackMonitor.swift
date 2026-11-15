@@ -11,7 +11,15 @@ final class PlaybackMonitor {
         case failure(Error)
     }
 
-    private static let sampleInterval: TimeInterval = 0.25
+    /// Positions between samples are interpolated by the views, so Music is
+    /// asked once a second while playing and every two seconds otherwise.
+    /// Every sample also costs Music.app CPU to answer the AppleScript.
+    /// Play, pause and track changes arrive at once through Music's
+    /// `playerInfo` notification instead of waiting for the next sample.
+    private static let playingInterval: TimeInterval = 1.0
+    private static let idleInterval: TimeInterval = 2.0
+    private var currentInterval: TimeInterval = 0
+    private var playerInfoObserver: NSObjectProtocol?
     private static let helperName = "AppleMusicLyricsPlaybackHelper"
 
     private struct HelperResponse: Decodable {
@@ -39,17 +47,16 @@ final class PlaybackMonitor {
         guard timer == nil else { return }
         isStopping = false
         startHelperIfNeeded()
-
-        let timer = Timer(timeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
-            self?.sampleNow()
+        schedule(interval: Self.idleInterval)
+        if playerInfoObserver == nil {
+            playerInfoObserver = DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.apple.Music.playerInfo"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.sampleNow()
+            }
         }
-        timer.tolerance = 0.04
-        self.timer = timer
-
-        // Menu tracking switches the main run loop out of its default mode.
-        // Sampling through the helper is asynchronous, so keep it active while
-        // the status menu is open to update its playback controls and lyrics.
-        RunLoop.main.add(timer, forMode: .common)
         sampleNow()
     }
 
@@ -57,7 +64,27 @@ final class PlaybackMonitor {
         isStopping = true
         timer?.invalidate()
         timer = nil
+        currentInterval = 0
+        if let playerInfoObserver {
+            DistributedNotificationCenter.default().removeObserver(playerInfoObserver)
+        }
+        playerInfoObserver = nil
         stopHelper()
+    }
+
+    private func schedule(interval: TimeInterval) {
+        guard !isStopping, interval != currentInterval else { return }
+        timer?.invalidate()
+        currentInterval = interval
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.sampleNow()
+        }
+        timer.tolerance = interval * 0.1
+        self.timer = timer
+        // Menu tracking switches the main run loop out of its default mode.
+        // Sampling through the helper is asynchronous, so keep it active while
+        // the status menu is open to update its playback controls and lyrics.
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func sampleNow() {
@@ -134,6 +161,8 @@ final class PlaybackMonitor {
     }
 
     private func deliver(_ response: HelperResponse) {
+        let playing = response.kind == "track" && response.state.map(PlayerState.init(appleScriptValue:)) == .playing
+        schedule(interval: playing ? Self.playingInterval : Self.idleInterval)
         switch response.kind {
         case "track":
             guard let title = response.title,

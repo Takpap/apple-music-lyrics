@@ -51,16 +51,38 @@ final class UserLyricsStore: @unchecked Sendable {
     func applyingTranslations(_ map: [String: String], to doc: LyricsDocument) -> LyricsDocument {
         guard !map.isEmpty else { return doc }
         var normalizedMap: [String: String] = [:]
+        var looseMap: [String: String] = [:]
+        var coreMap: [String: String] = [:]
         for (key, value) in map {
             let translation = value.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalized = Self.normalizeKey(key)
             guard !normalized.isEmpty, !translation.isEmpty else { continue }
             normalizedMap[normalized] = translation
+            let loose = Self.looseKey(key)
+            if !loose.isEmpty, looseMap[loose] == nil { looseMap[loose] = translation }
+            let core = Self.coreTokens(key).joined(separator: " ")
+            if !core.isEmpty, coreMap[core] == nil { coreMap[core] = translation }
         }
         guard !normalizedMap.isEmpty else { return doc }
+        let segments = coreMap.map { (tokens: $0.key.split(separator: " ").map(String.init), translation: $0.value) }
 
+        var composed: [[String]: String?] = [:]
         let lines = doc.lines.map { line -> LyricLine in
-            guard let translation = normalizedMap[Self.normalizeKey(line.text)] else { return line }
+            // Exact (case and spacing aside) first; then a looser match so a
+            // file written against one lyrics source still fits another that
+            // differs only in punctuation, apostrophes, accents or ad-libs;
+            // last, a line one source merges from several the file lists
+            // separately gets their translations joined.
+            let core = Self.coreTokens(line.text)
+            guard let translation = normalizedMap[Self.normalizeKey(line.text)]
+                    ?? looseMap[Self.looseKey(line.text)]
+                    ?? coreMap[core.joined(separator: " ")]
+                    ?? { () -> String? in
+                        if let cached = composed[core] { return cached }
+                        let result = Self.composedTranslation(of: core, from: segments)
+                        composed[core] = result
+                        return result
+                    }() else { return line }
             return LyricLine(
                 time: line.time,
                 text: line.text,
@@ -187,6 +209,123 @@ final class UserLyricsStore: @unchecked Sendable {
             .split(whereSeparator: { $0.isWhitespace })
             .joined(separator: " ")
             .lowercased()
+    }
+
+    /// Letters and digits only, case- and accent-insensitive, single spaces.
+    /// "Tu ne m’entends pas," and "tu ne m'entends pas" give the same key.
+    static func looseKey(_ value: String) -> String {
+        let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+        var result = ""
+        var pendingSpace = false
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                if pendingSpace, !result.isEmpty { result.append(" ") }
+                pendingSpace = false
+                result.unicodeScalars.append(scalar)
+            } else if CharacterSet.whitespacesAndNewlines.contains(scalar) || scalar == "-" {
+                pendingSpace = true
+            }
+        }
+        return result
+    }
+
+    /// Sung fillers ignored when matching: "Une seule arme m'emprisonne, yeah"
+    /// matches a file row without the "yeah".
+    static let fillerWords: Set<String> = ["yeah", "yeh", "oh", "ohh", "ooh", "ah", "aah", "eh", "hey", "uh", "mmh", "mm", "hmm", "woah", "whoa", "ay", "ayy"]
+
+    /// The loose key's words with parenthesised backing vocals and filler
+    /// words removed.
+    static func coreTokens(_ value: String) -> [String] {
+        var stripped = ""
+        var depth = 0
+        for character in value {
+            // Split elisions so "j'me" gives "j me", comparable to "je me".
+            if character == "'" || character == "’" || character == "ʼ" { stripped.append(" "); continue }
+            if character == "(" || character == "[" { depth += 1; stripped.append(" "); continue }
+            if character == ")" || character == "]" { depth = max(0, depth - 1); stripped.append(" "); continue }
+            if depth == 0 { stripped.append(character) }
+        }
+        // A line that is only a parenthesis keeps its words.
+        let tokens = looseKey(stripped).split(separator: " ").map(String.init).filter { !fillerWords.contains($0) }
+        if !tokens.isEmpty { return tokens }
+        return looseKey(value).split(separator: " ").map(String.init).filter { !fillerWords.contains($0) }
+    }
+
+    /// Covers `tokens` with file rows, in order, and joins their
+    /// translations. Rows may be reused (choruses) and, on lines of five or
+    /// more words, may differ by about one word in five in total ("le
+    /// jackpot" / "the jackpot", "j'me" / "je me"). Nil when no cover fits.
+    static func composedTranslation(of tokens: [String], from segments: [(tokens: [String], translation: String)]) -> String? {
+        let count = tokens.count
+        guard count >= 2, !segments.isEmpty else { return nil }
+        let budget = count >= 5 ? count / 5 : 0
+        // best[i]: cheapest cover of tokens[i...] as (edits, rows, row, end).
+        var best = [(edits: Int, rows: Int, segment: Int, end: Int)?](repeating: nil, count: count + 1)
+        best[count] = (0, 0, -1, count)
+        for start in stride(from: count - 1, through: 0, by: -1) {
+            for (index, segment) in segments.enumerated() {
+                let length = segment.tokens.count
+                let lower = max(start + 1, start + length - budget)
+                let upper = min(count, start + length + budget)
+                guard lower <= upper else { continue }
+                for end in lower...upper {
+                    guard let rest = best[end], rest.edits <= budget else { continue }
+                    let limit = budget - rest.edits
+                    guard let edits = tokenDistance(tokens[start..<end], segment.tokens, limit: limit) else { continue }
+                    let candidate = (edits: edits + rest.edits, rows: rest.rows + 1, segment: index, end: end)
+                    if let current = best[start],
+                       (current.edits, current.rows) <= (candidate.edits, candidate.rows) { continue }
+                    best[start] = candidate
+                }
+            }
+        }
+        guard let first = best[0], first.edits <= budget else { return nil }
+        var parts: [String] = []
+        var position = 0
+        while position < count, let step = best[position] {
+            parts.append(segments[step.segment].translation)
+            position = step.end
+        }
+        var result = parts[0]
+        for part in parts.dropFirst() {
+            if let last = result.last, !".,;:!?…—-".contains(last) { result += "," }
+            result += " " + continuation(part)
+        }
+        return result
+    }
+
+    /// Word-level edit distance, or nil once it exceeds `limit`. An elided
+    /// word matches its full form ("j" / "je", "c" / "ce").
+    static func tokenDistance(_ a: ArraySlice<String>, _ b: [String], limit: Int) -> Int? {
+        let a = Array(a)
+        guard !a.isEmpty, !b.isEmpty, abs(a.count - b.count) <= limit else { return nil }
+        func same(_ x: String, _ y: String) -> Bool {
+            if x == y { return true }
+            let (short, long) = x.count < y.count ? (x, y) : (y, x)
+            return short.count == 1 && long.count <= 3 && long.hasPrefix(short)
+        }
+        var previous = Array(0...b.count)
+        for i in 1...a.count {
+            var current = [i] + Array(repeating: 0, count: b.count)
+            var rowMin = i
+            for j in stride(from: 1, through: b.count, by: 1) {
+                let substitution = previous[j - 1] + (same(a[i - 1], b[j - 1]) ? 0 : 1)
+                current[j] = min(substitution, previous[j] + 1, current[j - 1] + 1)
+                rowMin = min(rowMin, current[j])
+            }
+            if rowMin > limit { return nil }
+            previous = current
+        }
+        let distance = previous[b.count]
+        return distance <= limit ? distance : nil
+    }
+
+    /// Lowercases a continuation's capital ("That you're there" → "that
+    /// you're there") but leaves "I", "I'm" and acronyms alone.
+    private static func continuation(_ part: String) -> String {
+        let characters = Array(part)
+        guard characters.count >= 2, characters[0].isUppercase, characters[1].isLowercase else { return part }
+        return characters[0].lowercased() + String(characters.dropFirst())
     }
 
     static func parseTranslations(_ text: String) -> [String: String] {

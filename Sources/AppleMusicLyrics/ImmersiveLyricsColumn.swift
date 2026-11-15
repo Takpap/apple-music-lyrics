@@ -18,190 +18,572 @@ struct LyricsMetrics: Equatable {
     var fadeWidth: CGFloat { fontSize * 0.55 }
 }
 
-private struct ItemHeightKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { $1 })
-    }
-}
-
 // MARK: - Column
 
-/// The right-hand lyrics column: every row is positioned absolutely and
-/// springs to its new place with a small per-row delay, which produces the
-/// cascading motion of Music.app's lyrics view.
-struct ImmersiveLyricsColumn: View {
+/// The state the column draws; equal states skip all work, so model updates
+/// that don't concern the lyrics (volume, artwork, chrome) cost nothing.
+struct LyricsColumnState: Equatable {
+    var items: [LyricDisplayItem]
+    var activeIndex: Int?
+    var isSynced: Bool
+    var isUserScrolling: Bool
+    var manualScrollOffset: CGFloat
+    var showTranslation: Bool
+    var hasExactWordTiming: Bool
+    var isPlaying: Bool
+    var metrics: LyricsMetrics
+    var anchorFraction: CGFloat
+}
+
+/// The right-hand lyrics column. Each row is a small SwiftUI view in its own
+/// hosting view whose content changes only when the row's own state does
+/// (it becomes the current line, a translation arrives). Moving the rows,
+/// and their scale, blur and fade as the current line changes, are Core
+/// Animation springs, with a small per-row delay for the cascading motion of
+/// Music.app's lyrics view. The render server plays them, so a line change
+/// no longer makes SwiftUI redraw the column on every display frame.
+struct ImmersiveLyricsColumn: NSViewRepresentable {
     @ObservedObject var model: ImmersiveLyricsModel
     let metrics: LyricsMetrics
     let anchorFraction: CGFloat
 
-    @State private var heights: [Int: CGFloat] = [:]
-    @State private var laidOut = false
+    func makeNSView(context: Context) -> LyricsColumnView {
+        LyricsColumnView(model: model)
+    }
 
-    var body: some View {
-        GeometryReader { geometry in
-            let tops = topOffsets()
-            let anchor = geometry.size.height * anchorFraction
-            let active = model.activeIndex ?? 0
-            let activeTop = tops.indices.contains(active) ? tops[active] : 0
-            let base = model.isSynced ? anchor - activeTop : geometry.size.height * 0.12
-
-            ZStack(alignment: .topLeading) {
-                ForEach(model.items) { item in
-                    let distance = model.isSynced ? item.id - (model.activeIndex ?? -1) : 0
-                    let target = base + (tops.indices.contains(item.id) ? tops[item.id] : 0)
-                    row(for: item, distance: distance)
-                        .frame(width: metrics.width + metrics.hoverPaddingH * 2, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(key: ItemHeightKey.self, value: [item.id: proxy.size.height])
-                            }
-                        )
-                        .offset(x: -metrics.hoverPaddingH, y: target)
-                        .animation(laidOut ? rowAnimation(distance: distance) : nil, value: target)
-                        .animation(.easeOut(duration: 0.35), value: model.isUserScrolling)
-                        .offset(y: model.manualScrollOffset)
-                }
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-            .overlay(alignment: .topTrailing) {
-                scrollIndicator(viewport: geometry.size.height, activeTop: activeTop, total: tops.last ?? 0)
-            }
-            .onPreferenceChange(ItemHeightKey.self) { value in
-                heights = value
-                if !laidOut, value.count >= model.items.count {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { laidOut = true }
-                }
-            }
-            .onAppear { publishScrollRange(viewport: geometry.size.height) }
-            .onChange(of: heights) { _ in publishScrollRange(viewport: geometry.size.height) }
-        }
-        .mask(
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.09),
-                    .init(color: .black, location: 0.86),
-                    .init(color: .clear, location: 1)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+    func updateNSView(_ view: LyricsColumnView, context: Context) {
+        view.update(
+            LyricsColumnState(
+                items: model.items,
+                activeIndex: model.activeIndex,
+                isSynced: model.isSynced,
+                isUserScrolling: model.isUserScrolling,
+                manualScrollOffset: model.manualScrollOffset,
+                showTranslation: model.showTranslation,
+                hasExactWordTiming: model.hasExactWordTiming,
+                isPlaying: model.isPlaying,
+                metrics: metrics,
+                anchorFraction: anchorFraction
+            ),
+            animated: context.transaction.animation != nil
         )
     }
+}
 
-    @ViewBuilder
-    private func row(for item: LyricDisplayItem, distance: Int) -> some View {
-        switch item.kind {
-        case .line(let line):
-            LyricRowView(
-                model: model,
-                item: item,
-                line: line,
-                distance: distance,
-                metrics: metrics
-            )
-        case .interlude:
-            InterludeRowView(
-                model: model,
-                item: item,
-                isActive: distance == 0,
-                metrics: metrics
-            )
+final class LyricsColumnView: NSView {
+    private let model: ImmersiveLyricsModel
+    private(set) var state: LyricsColumnState?
+    private(set) var rows: [LyricRowContainer] = []
+    private var heights: [CGFloat] = []
+    private var laidOut = false
+    private var moveCount = 0
+    private let fadeMask = CAGradientLayer()
+    private let indicatorTrack = CALayer()
+    private let indicatorThumb = CALayer()
+
+    init(model: ImmersiveLyricsModel) {
+        self.model = model
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        fadeMask.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+        fadeMask.locations = [0, 0.09, 0.86, 1]
+        layer?.mask = fadeMask
+        for capsule in [indicatorTrack, indicatorThumb] {
+            capsule.cornerRadius = 2.5
+            capsule.opacity = 0
+            capsule.zPosition = 10
+            layer?.addSublayer(capsule)
+        }
+        indicatorTrack.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        indicatorThumb.backgroundColor = NSColor.white.withAlphaComponent(0.75).cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // Wider than the column so the hover highlight, which reaches left
+        // of the text, is not cut off.
+        fadeMask.frame = bounds.insetBy(dx: -200, dy: 0)
+        CATransaction.commit()
+        relayout(animated: false, cascadeFrom: nil)
+    }
+
+    func update(_ new: LyricsColumnState, animated: Bool) {
+        guard new != state else { return }
+        let old = state
+        state = new
+
+        if old?.items.map(\.id) != new.items.map(\.id) || old?.metrics != new.metrics {
+            rebuildRows(new)
+        } else {
+            refreshContent(new)
+        }
+        let activeChanged = old?.activeIndex != new.activeIndex
+        let scrollModeChanged = old?.isUserScrolling != new.isUserScrolling
+        applyVisuals(new, animated: laidOut, cascade: activeChanged)
+        relayout(
+            animated: laidOut && (activeChanged || scrollModeChanged || animated || old?.showTranslation != new.showTranslation),
+            cascadeFrom: activeChanged ? new.activeIndex : nil,
+            slow: scrollModeChanged || (animated && !activeChanged)
+        )
+        if !laidOut, !rows.isEmpty, bounds.height > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.laidOut = true }
         }
     }
 
-    /// Thin indicator on the right while the user scrolls, as in Music.app.
-    @ViewBuilder
-    private func scrollIndicator(viewport: CGFloat, activeTop: CGFloat, total: CGFloat) -> some View {
-        if model.isUserScrolling, total > 0 {
-            let track = viewport * 0.7
-            let thumb = max(36, track * min(1, viewport / (total + viewport)))
-            let current = activeTop - model.manualScrollOffset
-            let fraction = min(max(current / total, 0), 1)
-            ZStack(alignment: .top) {
-                Capsule().fill(Color.white.opacity(0.12)).frame(width: 5, height: track)
-                Capsule().fill(Color.white.opacity(0.75)).frame(width: 5, height: thumb)
-                    .offset(y: (track - thumb) * fraction)
+    // MARK: Rows
+
+    private func rebuildRows(_ state: LyricsColumnState) {
+        rows.forEach { $0.removeFromSuperview() }
+        rows = state.items.map { item in
+            let row = LyricRowContainer()
+            row.onHeightChange = { [weak self, weak row] height in
+                guard let self, let row, let index = self.rows.firstIndex(where: { $0 === row }) else { return }
+                self.setHeight(height, at: index)
             }
-            .padding(.top, viewport * 0.14)
-            .transition(.opacity)
+            addSubview(row)
+            return row
+        }
+        heights = Array(repeating: 0, count: rows.count)
+        refreshContent(state)
+    }
+
+    private func refreshContent(_ state: LyricsColumnState) {
+        for (index, item) in state.items.enumerated() where rows.indices.contains(index) {
+            let isActive = state.isSynced && state.activeIndex == item.id
+            let content = LyricRowContent(
+                model: model,
+                item: item,
+                isActive: isActive,
+                metrics: state.metrics,
+                isSynced: state.isSynced,
+                showTranslation: state.showTranslation,
+                hasExactWordTiming: state.hasExactWordTiming,
+                // Only the current line plays, so play/pause redraws one row.
+                isPlaying: isActive && state.isPlaying
+            )
+            if rows[index].setContent(content, width: rowWidth(state.metrics)) {
+                heights[index] = rows[index].measuredHeight
+            }
         }
     }
 
-    private func topOffsets() -> [CGFloat] {
+    private func setHeight(_ height: CGFloat, at index: Int) {
+        guard heights.indices.contains(index), abs(heights[index] - height) > 0.5 else { return }
+        heights[index] = height
+        relayout(animated: laidOut, cascadeFrom: nil)
+    }
+
+    private func rowWidth(_ metrics: LyricsMetrics) -> CGFloat {
+        metrics.width + metrics.hoverPaddingH * 2
+    }
+
+    // MARK: Layout
+
+    private func tops(_ metrics: LyricsMetrics) -> [CGFloat] {
         var tops: [CGFloat] = []
-        tops.reserveCapacity(model.items.count)
+        tops.reserveCapacity(heights.count + 1)
         var y: CGFloat = 0
-        for item in model.items {
+        for height in heights {
             tops.append(y)
-            let height = heights[item.id] ?? (metrics.fontSize * 1.3 + metrics.hoverPaddingV * 2)
             y += height + (height > 1 ? metrics.itemSpacing : 0)
         }
+        tops.append(y)
         return tops
     }
 
-    private func publishScrollRange(viewport: CGFloat) {
-        let total = topOffsets().last.map { $0 + metrics.fontSize * 2 } ?? 0
-        model.scrollLimit = -(total) ... max(viewport * 0.6, total)
+    private func relayout(animated: Bool, cascadeFrom active: Int?, slow: Bool = false) {
+        guard let state, !rows.isEmpty, bounds.height > 0 else { return }
+        let metrics = state.metrics
+        let tops = tops(metrics)
+        let activeIndex = min(max(state.activeIndex ?? 0, 0), rows.count - 1)
+        let base = state.isSynced
+            ? bounds.height * state.anchorFraction - tops[activeIndex]
+            : bounds.height * 0.12
+        let now = CACurrentMediaTime()
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (index, row) in rows.enumerated() {
+            let frame = CGRect(
+                x: -metrics.hoverPaddingH,
+                y: (base + tops[index] + state.manualScrollOffset).rounded(),
+                width: rowWidth(metrics),
+                height: max(heights[index], 0)
+            )
+            let delta = row.frame.minY - frame.minY
+            let wasPlaced = row.frame != .zero
+            row.frame = frame
+            guard animated, wasPlaced, abs(delta) > 0.5, !row.isHidden,
+                  frame.maxY > -bounds.height, frame.minY < bounds.height * 2,
+                  let layer = row.layer else { continue }
+            let distance = active.map { index - $0 } ?? 0
+            let delay = active != nil && distance >= -1 ? min(Double(distance + 1) * 0.035, 0.25) : 0
+            let spring = Self.spring(keyPath: "position.y", slow: slow)
+            spring.fromValue = delta
+            spring.toValue = 0
+            spring.isAdditive = true
+            spring.beginTime = now + delay
+            spring.fillMode = .backwards
+            // Unique keys let a new move stack on one still settling, so
+            // fast line changes stay smooth instead of jumping.
+            moveCount &+= 1
+            layer.add(spring, forKey: "move\(moveCount)")
+        }
+        CATransaction.commit()
+
+        let total = tops.last.map { $0 + metrics.fontSize * 2 } ?? 0
+        model.scrollLimit = -(total) ... max(bounds.height * 0.6, total)
+        updateIndicator(state, activeTop: tops[activeIndex], total: tops.last ?? 0)
     }
 
-    /// Rows above the current line move first and later rows follow, about
-    /// 45 ms apart, like Music.app.
-    private func rowAnimation(distance: Int) -> Animation {
-        let spring = Animation.spring(response: 0.62, dampingFraction: 0.84)
-        guard distance >= -1 else { return spring }
-        return spring.delay(min(Double(distance + 1) * 0.045, 0.4))
+    /// SwiftUI's spring(response: 0.52, dampingFraction: 0.9); a softer one
+    /// (0.7, 0.86) when manual scrolling ends.
+    static func spring(keyPath: String, slow: Bool = false) -> CASpringAnimation {
+        let response = slow ? 0.7 : 0.52
+        let damping = slow ? 0.86 : 0.9
+        let animation = CASpringAnimation(keyPath: keyPath)
+        let omega = 2 * Double.pi / response
+        animation.mass = 1
+        animation.stiffness = omega * omega
+        animation.damping = 2 * damping * omega
+        animation.duration = animation.settlingDuration
+        return animation
+    }
+
+    // MARK: Row visuals
+
+    private func applyVisuals(_ state: LyricsColumnState, animated: Bool, cascade: Bool) {
+        let active = state.activeIndex ?? 0
+        let now = CACurrentMediaTime()
+        for (index, row) in rows.enumerated() {
+            let distance = state.isSynced ? index - active : 0
+            let unfocused = state.isUserScrolling || !state.isSynced
+            var visual = LyricRowContainer.Visual.plain
+            if case .line = state.items[index].kind {
+                if !state.isSynced {
+                    visual.opacity = 0.92
+                } else if state.isUserScrolling {
+                    visual.opacity = 0.42
+                } else {
+                    visual.opacity = abs(distance) > 7 ? 0 : 1
+                }
+                if !unfocused, distance != 0 {
+                    let steps = CGFloat(min(abs(distance), 6))
+                    visual.blur = min(1.4 + (steps - 1) * 1.0, 6) * (state.metrics.fontSize / 36)
+                    visual.scale = 0.97
+                }
+            }
+            // Rows well past the faded-out ones are hidden, so the render
+            // server skips them; when they come back they fade in from 0.
+            let hidden = state.isSynced && !state.isUserScrolling && abs(distance) > 9
+            let delay = cascade && distance >= -1 ? min(Double(distance + 1) * 0.035, 0.25) : 0
+            row.apply(visual, hidden: hidden, animated: animated, beginTime: now + delay)
+        }
+    }
+
+    // MARK: Scroll indicator
+
+    private func updateIndicator(_ state: LyricsColumnState, activeTop: CGFloat, total: CGFloat) {
+        let visible = state.isUserScrolling && total > 0
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.25)
+        if visible {
+            CATransaction.setDisableActions(indicatorTrack.opacity > 0)
+            let viewport = bounds.height
+            let track = viewport * 0.7
+            let thumb = max(36, track * min(1, viewport / (total + viewport)))
+            let fraction = min(max((activeTop - state.manualScrollOffset) / total, 0), 1)
+            let x = bounds.width - 5
+            indicatorTrack.frame = CGRect(x: x, y: viewport * 0.14, width: 5, height: track)
+            indicatorThumb.frame = CGRect(x: x, y: viewport * 0.14 + (track - thumb) * fraction, width: 5, height: thumb)
+        }
+        CATransaction.commit()
+        let opacity: Float = visible ? 1 : 0
+        if indicatorTrack.opacity != opacity {
+            indicatorTrack.opacity = opacity
+            indicatorThumb.opacity = opacity
+        }
+    }
+}
+
+/// One row: a hosting view for its SwiftUI content inside a layer whose
+/// opacity, blur and scale Core Animation plays.
+final class LyricRowContainer: NSView {
+    struct Visual: Equatable {
+        var opacity: CGFloat
+        var blur: CGFloat
+        var scale: CGFloat
+        static let plain = Visual(opacity: 1, blur: 0, scale: 1)
+    }
+
+    private let hosting: NSHostingView<LyricRowContentView>
+    private(set) var content: LyricRowContent?
+    private(set) var visual = Visual.plain
+    private(set) var measuredHeight: CGFloat = 0
+    var onHeightChange: ((CGFloat) -> Void)?
+
+    init() {
+        hosting = NSHostingView(rootView: LyricRowContentView(content: nil, onHeight: { _ in }))
+        super.init(frame: .zero)
+        wantsLayer = true
+        layerUsesCoreImageFilters = true
+        hosting.sizingOptions = [.intrinsicContentSize]
+        hosting.autoresizingMask = [.width, .height]
+        addSubview(hosting)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    /// Faded-out rows don't take clicks or hover, as in SwiftUI.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        visual.opacity < 0.05 || isHidden ? nil : super.hitTest(point)
+    }
+
+    override func layout() {
+        super.layout()
+        hosting.frame = bounds
+        updateScaleTransform(animated: false, beginTime: 0)
+    }
+
+    /// Returns true when the content changed and was measured again.
+    @discardableResult
+    func setContent(_ content: LyricRowContent, width: CGFloat) -> Bool {
+        guard content != self.content else { return false }
+        self.content = content
+        hosting.rootView = LyricRowContentView(content: content, onHeight: { [weak self] height in
+            guard let self, abs(self.measuredHeight - height) > 0.5 else { return }
+            self.measuredHeight = height
+            self.onHeightChange?(height)
+        })
+        if hosting.frame.width != width {
+            hosting.frame.size.width = width
+        }
+        measuredHeight = hosting.fittingSize.height
+        return true
+    }
+
+    func apply(_ new: Visual, hidden: Bool, animated: Bool, beginTime: CFTimeInterval) {
+        if isHidden != hidden { isHidden = hidden }
+        guard new != visual, let layer else { return }
+        let old = visual
+        visual = new
+        let animate = animated && !hidden
+
+        if old.opacity != new.opacity {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.opacity = Float(new.opacity)
+            CATransaction.commit()
+            if animate {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = (layer.presentation()?.opacity).map { CGFloat($0) } ?? old.opacity
+                fade.toValue = new.opacity
+                fade.duration = 0.45
+                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                fade.beginTime = beginTime
+                fade.fillMode = .backwards
+                layer.add(fade, forKey: "opacity")
+            }
+        }
+
+        if old.blur != new.blur {
+            setBlur(from: old.blur, to: new.blur, animated: animate, beginTime: beginTime)
+        }
+        if old.scale != new.scale {
+            updateScaleTransform(animated: animate, beginTime: beginTime, from: old.scale)
+        }
+    }
+
+    // MARK: Blur
+
+    private static let blurName = "rowBlur"
+    private var blurRemoval: DispatchWorkItem?
+
+    private func setBlur(from old: CGFloat, to new: CGFloat, animated: Bool, beginTime: CFTimeInterval) {
+        guard let layer else { return }
+        blurRemoval?.cancel()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if layer.filters?.isEmpty ?? true {
+            guard let filter = CIFilter(name: "CIGaussianBlur") else { CATransaction.commit(); return }
+            filter.name = Self.blurName
+            filter.setValue(animated ? old : new, forKey: kCIInputRadiusKey)
+            layer.filters = [filter]
+        }
+        layer.setValue(new, forKeyPath: "filters.\(Self.blurName).inputRadius")
+        CATransaction.commit()
+
+        if animated {
+            let animation = CABasicAnimation(keyPath: "filters.\(Self.blurName).inputRadius")
+            animation.fromValue = old
+            animation.toValue = new
+            animation.duration = 0.45
+            animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animation.beginTime = beginTime
+            animation.fillMode = .backwards
+            layer.add(animation, forKey: "blur")
+        }
+        // An unblurred row, such as the current line, drops the filter so
+        // it is not drawn off screen every frame.
+        if new == 0 {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.visual.blur == 0 else { return }
+                self.layer?.filters = nil
+            }
+            blurRemoval = work
+            let wait = animated ? max(0, beginTime - CACurrentMediaTime()) + 0.5 : 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+        }
+    }
+
+    // MARK: Scale
+
+    /// Scales the row about its leading edge's vertical centre.
+    private func scaleTransform(_ scale: CGFloat) -> CATransform3D {
+        guard scale != 1, let layer else { return CATransform3DIdentity }
+        let anchor = CGPoint(x: layer.anchorPoint.x * bounds.width, y: layer.anchorPoint.y * bounds.height)
+        let pivot = CGPoint(x: 0, y: bounds.height / 2)
+        var transform = CATransform3DMakeTranslation(pivot.x - anchor.x, pivot.y - anchor.y, 0)
+        transform = CATransform3DScale(transform, scale, scale, 1)
+        return CATransform3DTranslate(transform, anchor.x - pivot.x, anchor.y - pivot.y, 0)
+    }
+
+    private func updateScaleTransform(animated: Bool, beginTime: CFTimeInterval, from old: CGFloat? = nil) {
+        guard let layer else { return }
+        let target = scaleTransform(visual.scale)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.sublayerTransform = target
+        CATransaction.commit()
+        guard animated, let old else { return }
+        let animation = LyricsColumnView.spring(keyPath: "sublayerTransform")
+        animation.fromValue = NSValue(caTransform3D: layer.presentation()?.sublayerTransform ?? scaleTransform(old))
+        animation.toValue = NSValue(caTransform3D: target)
+        animation.beginTime = beginTime
+        animation.fillMode = .backwards
+        layer.add(animation, forKey: "scale")
+    }
+}
+
+/// Everything a row's SwiftUI content depends on.
+struct LyricRowContent: Equatable {
+    let model: ImmersiveLyricsModel
+    let item: LyricDisplayItem
+    let isActive: Bool
+    let metrics: LyricsMetrics
+    let isSynced: Bool
+    let showTranslation: Bool
+    let hasExactWordTiming: Bool
+    let isPlaying: Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.model === rhs.model && lhs.item == rhs.item && lhs.isActive == rhs.isActive
+            && lhs.metrics == rhs.metrics && lhs.isSynced == rhs.isSynced
+            && lhs.showTranslation == rhs.showTranslation
+            && lhs.hasExactWordTiming == rhs.hasExactWordTiming && lhs.isPlaying == rhs.isPlaying
+    }
+}
+
+struct LyricRowContentView: View {
+    let content: LyricRowContent?
+    let onHeight: (CGFloat) -> Void
+
+    var body: some View {
+        if let content {
+            row(content)
+                .frame(width: content.metrics.width + content.metrics.hoverPaddingH * 2, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .onAppear { onHeight(proxy.size.height) }
+                            .onChange(of: proxy.size.height) { onHeight($0) }
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ content: LyricRowContent) -> some View {
+        switch content.item.kind {
+        case .line(let line):
+            LyricRowView(
+                model: content.model,
+                item: content.item,
+                line: line,
+                isActive: content.isActive,
+                metrics: content.metrics,
+                isSynced: content.isSynced,
+                showTranslation: content.showTranslation,
+                hasExactWordTiming: content.hasExactWordTiming,
+                isPlaying: content.isPlaying
+            )
+        case .interlude:
+            InterludeRowView(
+                model: content.model,
+                item: content.item,
+                isActive: content.isActive,
+                metrics: content.metrics,
+                isPlaying: content.isPlaying
+            )
+        }
     }
 }
 
 // MARK: - Lyric row
 
-private struct LyricRowView: View {
-    @ObservedObject var model: ImmersiveLyricsModel
+/// A lyric line's content. It does not observe the model: it gets plain
+/// values, and its hosting view is only given new ones when they change.
+/// Position, scale, blur and fade are the column's Core Animation layers.
+private struct LyricRowView: View, Equatable {
+    let model: ImmersiveLyricsModel
     let item: LyricDisplayItem
     let line: LyricLine
-    let distance: Int
+    let isActive: Bool
     let metrics: LyricsMetrics
+    let isSynced: Bool
+    let showTranslation: Bool
+    let hasExactWordTiming: Bool
+    let isPlaying: Bool
 
     @State private var hovering = false
 
-    private var isActive: Bool { model.isSynced && distance == 0 }
-    private var unfocused: Bool { model.isUserScrolling || !model.isSynced }
-
-    private var wordTimed: Bool { model.hasExactWordTiming && !line.words.isEmpty }
-
-    private var blurRadius: CGFloat {
-        guard !unfocused, distance != 0 else { return 0 }
-        let steps = CGFloat(min(abs(distance), 6))
-        return min(1.4 + (steps - 1) * 1.0, 6) * (metrics.fontSize / 36)
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.model === rhs.model && lhs.item == rhs.item && lhs.isActive == rhs.isActive
+            && lhs.metrics == rhs.metrics && lhs.isSynced == rhs.isSynced
+            && lhs.showTranslation == rhs.showTranslation
+            && lhs.hasExactWordTiming == rhs.hasExactWordTiming && lhs.isPlaying == rhs.isPlaying
     }
 
-    private var dimOpacity: Double {
-        if !model.isSynced { return 0.92 }
-        if model.isUserScrolling { return 0.42 }
-        return abs(distance) > 7 ? 0.0 : 1
-    }
+    private var wordTimed: Bool { hasExactWordTiming && !line.words.isEmpty }
 
     private var translation: String? {
-        guard model.showTranslation, let value = line.translation, !value.isEmpty else { return nil }
+        guard showTranslation, let value = line.translation, !value.isEmpty else { return nil }
         return value
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: metrics.translationSize * 0.3) {
             if isActive && wordTimed {
-                TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !model.isPlaying)) { _ in
-                    WordFlowView(
-                        line: line,
-                        item: item,
-                        position: model.position(),
-                        exactTiming: true,
-                        isActive: true,
-                        metrics: metrics
-                    )
-                }
+                // Core Animation plays the word sweep; see KaraokeLayerViews.
+                KaraokeLine(
+                    model: model,
+                    groups: WordGrouping.groups(for: line, item: item, wordTimed: true),
+                    metrics: metrics,
+                    isPlaying: isPlaying
+                )
             } else {
                 WordFlowView(
                     line: line,
@@ -210,14 +592,24 @@ private struct LyricRowView: View {
                     exactTiming: wordTimed,
                     isActive: isActive,
                     metrics: metrics,
-                    staticBright: !model.isSynced
+                    staticBright: !isSynced
                 )
+                // Rasterise the words once, so the row's scale and blur
+                // animations as lines change never make the text draw again.
+                // Only this branch: the karaoke line above is an AppKit view,
+                // which SwiftUI can't put in a drawing group (it draws a red
+                // "not supported" placeholder instead, which showed on the
+                // lyrics while that view faded out after its line). The
+                // margin keeps lifted or glowing words from being clipped.
+                .padding(metrics.fontSize * 0.25)
+                .drawingGroup()
+                .padding(-metrics.fontSize * 0.25)
             }
 
             if let translation {
                 Text(translation)
                     .font(.system(size: metrics.translationSize, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(isActive ? 0.72 : (model.isSynced ? 0.3 : 0.6)))
+                    .foregroundStyle(Color.white.opacity(isActive ? 0.72 : (isSynced ? 0.3 : 0.6)))
                     .fixedSize(horizontal: false, vertical: true)
                     .animation(.easeOut(duration: 0.45), value: isActive)
             }
@@ -227,20 +619,14 @@ private struct LyricRowView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: metrics.fontSize * 0.3, style: .continuous)
-                .fill(Color.white.opacity(hovering && model.isSynced ? 0.09 : 0))
+                .fill(Color.white.opacity(hovering && isSynced ? 0.09 : 0))
         )
-        .scaleEffect(isActive || unfocused ? 1 : 0.97, anchor: .leading)
-        .blur(radius: blurRadius)
-        // Rasterise the row once: the window compositor then moves a plain
-        // texture instead of re-running a blur filter on every frame.
-        .drawingGroup()
-        .opacity(dimOpacity)
         .contentShape(Rectangle())
         .onHover { inside in
             withAnimation(.easeOut(duration: 0.18)) { hovering = inside }
         }
         .onTapGesture {
-            guard model.isSynced else { return }
+            guard isSynced else { return }
             model.seek(to: item.start)
         }
         .contextMenu {
@@ -250,7 +636,7 @@ private struct LyricRowView: View {
             if let value = line.translation, !value.isEmpty {
                 Button("Copy Translation") { Self.copy(value) }
             }
-            if model.isSynced {
+            if isSynced {
                 Button("Play from Here") { model.seek(to: item.start) }
             }
         }
@@ -490,18 +876,23 @@ private struct LyricFlowLayout: Layout {
 
 // MARK: - Interlude dots
 
-private struct InterludeRowView: View {
-    @ObservedObject var model: ImmersiveLyricsModel
+private struct InterludeRowView: View, Equatable {
+    let model: ImmersiveLyricsModel
     let item: LyricDisplayItem
     let isActive: Bool
     let metrics: LyricsMetrics
+    let isPlaying: Bool
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.model === rhs.model && lhs.item == rhs.item && lhs.isActive == rhs.isActive
+            && lhs.metrics == rhs.metrics && lhs.isPlaying == rhs.isPlaying
+    }
 
     var body: some View {
         Group {
             if isActive {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !model.isPlaying)) { _ in
-                    dots(position: model.position())
-                }
+                InterludeDots(model: model, start: item.start, end: item.end, metrics: metrics, isPlaying: isPlaying)
+                    .frame(width: metrics.dotSize * 4.5, height: metrics.dotSize * 1.6, alignment: .leading)
             } else {
                 dots(position: nil)
             }

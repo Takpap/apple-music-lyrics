@@ -7,6 +7,82 @@ import XCTest
 /// Runs only when IMMERSIVE_SNAPSHOT_DIR is set.
 @MainActor
 final class ImmersiveSnapshotTests: XCTestCase {
+    /// The progress bar is an AppKit view, which `ImageRenderer` cannot draw,
+    /// so it gets its own picture from its layer tree.
+    func testRenderProgressBar() throws {
+        guard let directory = ProcessInfo.processInfo.environment["IMMERSIVE_SNAPSHOT_DIR"] else {
+            throw XCTSkip("Set IMMERSIVE_SNAPSHOT_DIR to render snapshots")
+        }
+        let model = ImmersiveLyricsModel()
+        let track = TrackInfo(title: "T", artist: "A", album: "", duration: 200, position: 70, state: .paused)
+        model.apply(status: .showing(track: track, lyrics: Self.sampleLyrics(), currentLine: ""))
+        let size = NSSize(width: 360, height: 32)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: .borderless, backing: .buffered, defer: false)
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(calibratedRed: 0.25, green: 0.2, blue: 0.35, alpha: 1).cgColor
+        window.contentView = container
+        let bar = ProgressBarView(model: model)
+        bar.frame = container.bounds
+        container.addSubview(bar)
+        container.layoutSubtreeIfNeeded()
+        container.displayIfNeeded()
+        bar.refresh()
+        let scale: CGFloat = 2
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: rep), let barLayer = bar.layer else {
+            return XCTFail("Could not make a bitmap")
+        }
+        let cg = context.cgContext
+        cg.scaleBy(x: scale, y: scale)
+        cg.setFillColor(NSColor(calibratedRed: 0.25, green: 0.2, blue: 0.35, alpha: 1).cgColor)
+        cg.fill(CGRect(origin: .zero, size: size))
+        // The bar view is flipped; flip the context to match its layers.
+        cg.saveGState()
+        cg.translateBy(x: 0, y: size.height)
+        cg.scaleBy(x: 1, y: -1)
+        barLayer.render(in: cg)
+        cg.restoreGState()
+        // The time labels are subviews, drawn by AppKit.
+        bar.displayIgnoringOpacity(bar.bounds, in: context)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("PNG failed") }
+        try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("progress-bar.png"))
+        XCTAssertEqual(ProgressBarView.format(70), "1:10")
+    }
+
+    /// Renders the animated background at a few moments. Uses the image at
+    /// IMMERSIVE_ARTWORK when set, else the sample artwork.
+    func testRenderBackdrop() throws {
+        guard let directory = ProcessInfo.processInfo.environment["IMMERSIVE_SNAPSHOT_DIR"] else {
+            throw XCTSkip("Set IMMERSIVE_SNAPSHOT_DIR to render snapshots")
+        }
+        let artwork = ProcessInfo.processInfo.environment["IMMERSIVE_ARTWORK"].flatMap(NSImage.init(contentsOfFile:))
+            ?? Self.sampleArtwork()
+        let palette = ArtworkPalette.make(from: artwork)
+        let size = NSSize(width: 1200, height: 750)
+        let view = BackdropView(frame: NSRect(origin: .zero, size: size))
+        view.apply(palette)
+        view.layout()
+        for time in [0.0, 25, 60] {
+            view.pose(at: time)
+            let scale: CGFloat = 1
+            guard let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            ), let context = NSGraphicsContext(bitmapImageRep: rep), let layer = view.layer else {
+                return XCTFail("Could not make a bitmap")
+            }
+            view.layer?.removeAllAnimations()
+            layer.render(in: context.cgContext)
+            guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("PNG failed") }
+            try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("backdrop-\(Int(time)).png"))
+        }
+    }
+
     func testRenderSnapshots() throws {
         guard let directory = ProcessInfo.processInfo.environment["IMMERSIVE_SNAPSHOT_DIR"] else {
             throw XCTSkip("Set IMMERSIVE_SNAPSHOT_DIR to render snapshots")
@@ -37,6 +113,40 @@ final class ImmersiveSnapshotTests: XCTestCase {
             }
             try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("immersive-\(name).png"))
         }
+    }
+
+    /// Hosts the real view tree in an off-screen window and renders its layer
+    /// tree, so AppKit-backed pieces (the Core Animation karaoke line) show up.
+    func testRenderHostedSnapshot() throws {
+        guard let directory = ProcessInfo.processInfo.environment["IMMERSIVE_SNAPSHOT_DIR"] else {
+            throw XCTSkip("Set IMMERSIVE_SNAPSHOT_DIR to render snapshots")
+        }
+        let model = ImmersiveLyricsModel()
+        model.setArtworkForPreview(Self.sampleArtwork())
+        let track = TrackInfo(title: "Le Vent du Soir", artist: "Exemple", album: "Démo",
+                              duration: 180, position: 13.1, state: .paused)
+        model.apply(status: .showing(track: track, lyrics: Self.sampleLyrics(), currentLine: ""))
+        let size = CGSize(width: 1200, height: 750)
+        let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: size.width, height: size.height),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        let host = NSHostingView(rootView: ImmersiveLyricsRootView(model: model))
+        host.frame = NSRect(origin: .zero, size: size)
+        host.wantsLayer = true
+        window.contentView = host
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        host.layoutSubtreeIfNeeded()
+        guard let layer = host.layer else { return XCTFail("No layer") }
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width) * 2, pixelsHigh: Int(size.height) * 2,
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let context = NSGraphicsContext(bitmapImageRep: rep)!
+        context.cgContext.translateBy(x: 0, y: size.height * 2)
+        context.cgContext.scaleBy(x: 2, y: -2)
+        layer.render(in: context.cgContext)
+        window.orderOut(nil)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("PNG failed") }
+        try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("hosted-wide.png"))
     }
 
     static func sampleLyrics() -> LyricsDocument {

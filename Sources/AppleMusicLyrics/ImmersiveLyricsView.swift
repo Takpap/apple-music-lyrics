@@ -1,4 +1,4 @@
-import AVKit
+import AppKit
 import QuartzCore
 import SwiftUI
 import Translation
@@ -107,7 +107,7 @@ struct ImmersiveLyricsRootView: View {
             // Top right: output device and volume.
             GlassCapsule {
                 HStack(spacing: 10) {
-                    AirPlayRouteButton()
+                    AirPlayMenuButton(model: model)
                         .frame(width: 22, height: 22)
                     Rectangle()
                         .fill(Color.white.opacity(0.18))
@@ -116,7 +116,7 @@ struct ImmersiveLyricsRootView: View {
                         get: { model.extras.volume },
                         set: { model.setVolume($0) }
                     ))
-                    .frame(width: 80)
+                    .frame(width: 170)
                     Image(systemName: model.extras.volume < 1 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.85))
@@ -130,6 +130,15 @@ struct ImmersiveLyricsRootView: View {
 
             // Bottom right: translation, lyrics and Up Next.
             HStack(spacing: 8) {
+                if let name = model.downloadableLanguageName {
+                    GlassCircleToggle(
+                        systemName: "arrow.down.circle",
+                        isOn: false,
+                        help: "Download \(name) to translate the remaining lines"
+                    ) {
+                        model.requestTranslationDownload()
+                    }
+                }
                 if model.items.contains(where: { $0.line?.translation != nil }) {
                     GlassCircleToggle(
                         systemName: "translate",
@@ -139,14 +148,6 @@ struct ImmersiveLyricsRootView: View {
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                             model.showTranslation.toggle()
                         }
-                    }
-                } else if let name = model.downloadableLanguageName {
-                    GlassCircleToggle(
-                        systemName: "translate",
-                        isOn: false,
-                        help: "Download \(name) to show translations"
-                    ) {
-                        model.requestTranslationDownload()
                     }
                 }
                 GlassCapsule {
@@ -201,10 +202,14 @@ private struct PlayerPanel: View {
             }
             .padding(.bottom, 14)
 
-            TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-                ProgressScrubber(model: model)
-            }
-            .padding(.bottom, 18)
+            ProgressScrubberBar(
+                model: model,
+                isPlaying: model.isPlaying,
+                trackKey: model.track?.identityKey,
+                duration: model.duration
+            )
+            .frame(height: 32)
+            .padding(.bottom, 17)
 
             TransportControls(model: model)
         }
@@ -245,62 +250,6 @@ private struct ArtworkView: View {
         .scaleEffect(isPlaying ? 1 : 0.86)
         .animation(.spring(response: 0.55, dampingFraction: 0.72), value: isPlaying)
         .animation(.easeInOut(duration: 0.4), value: image != nil)
-    }
-}
-
-private struct ProgressScrubber: View {
-    @ObservedObject var model: ImmersiveLyricsModel
-    @State private var dragFraction: CGFloat?
-    @State private var hovering = false
-
-    var body: some View {
-        let duration = max(model.duration, 0.01)
-        let current = model.position()
-        let fraction = dragFraction ?? CGFloat(min(max(current / duration, 0), 1))
-        let shown = dragFraction.map { TimeInterval($0) * duration } ?? current
-
-        VStack(spacing: 6) {
-            GeometryReader { proxy in
-                let height: CGFloat = hovering || dragFraction != nil ? 8 : 5
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.22))
-                    Capsule().fill(Color.white.opacity(hovering || dragFraction != nil ? 0.9 : 0.72))
-                        .frame(width: max(height, proxy.size.width * fraction))
-                }
-                .frame(height: height)
-                .frame(maxHeight: .infinity, alignment: .center)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            model.isScrubbing = true
-                            dragFraction = min(max(value.location.x / proxy.size.width, 0), 1)
-                        }
-                        .onEnded { value in
-                            let final = min(max(value.location.x / proxy.size.width, 0), 1)
-                            model.seek(to: TimeInterval(final) * duration)
-                            model.isScrubbing = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { dragFraction = nil }
-                        }
-                )
-                .animation(.easeOut(duration: 0.15), value: height)
-            }
-            .frame(height: 12)
-            .onHover { hovering = $0 }
-
-            HStack {
-                Text(Self.format(shown))
-                Spacer()
-                Text("-" + Self.format(max(duration - shown, 0)))
-            }
-            .font(.system(size: 11, weight: .medium).monospacedDigit())
-            .foregroundStyle(Color.white.opacity(0.5))
-        }
-    }
-
-    static func format(_ time: TimeInterval) -> String {
-        let total = Int(time.rounded(.down))
-        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
@@ -550,12 +499,12 @@ private struct VolumeSlider: View {
             let fraction = CGFloat(min(max(value / 100, 0), 1))
             let knobWidth: CGFloat = 22
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.22)).frame(height: 5)
+                Capsule().fill(Color.white.opacity(0.22)).frame(height: 6)
                 Capsule().fill(Color.white.opacity(0.9))
-                    .frame(width: max(5, (proxy.size.width - knobWidth) * fraction + knobWidth / 2), height: 5)
+                    .frame(width: max(6, (proxy.size.width - knobWidth) * fraction + knobWidth / 2), height: 6)
                 Capsule()
                     .fill(Color.white)
-                    .frame(width: knobWidth, height: 14)
+                    .frame(width: knobWidth, height: 16)
                     .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
                     .offset(x: (proxy.size.width - knobWidth) * fraction)
                     .scaleEffect(dragging ? 1.1 : 1)
@@ -572,23 +521,22 @@ private struct VolumeSlider: View {
                     .onEnded { _ in dragging = false }
             )
         }
-        .frame(height: 20)
+        // Taller than it looks so it is easy to grab.
+        .frame(height: 30)
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: dragging)
     }
 }
 
-/// The system output picker (AirPlay and other devices).
-private struct AirPlayRouteButton: NSViewRepresentable {
-    func makeNSView(context: Context) -> AVRoutePickerView {
-        let view = AVRoutePickerView()
-        view.isRoutePickerButtonBordered = false
-        view.setRoutePickerButtonColor(.white.withAlphaComponent(0.85), for: .normal)
-        view.setRoutePickerButtonColor(.white, for: .normalHighlighted)
-        view.setRoutePickerButtonColor(.systemBlue, for: .active)
-        return view
+/// Music's AirPlay picker. The system route picker would only move this
+/// app's own audio, so the menu lists Music's outputs and switches Music.
+private struct AirPlayMenuButton: NSViewRepresentable {
+    let model: ImmersiveLyricsModel
+
+    func makeNSView(context: Context) -> AirPlayMenuButtonView {
+        AirPlayMenuButtonView(model: model)
     }
 
-    func updateNSView(_ nsView: AVRoutePickerView, context: Context) {}
+    func updateNSView(_ nsView: AirPlayMenuButtonView, context: Context) {}
 }
 
 // MARK: - Translation editor
@@ -731,9 +679,10 @@ private struct TranslationDownloadTask: ViewModifier {
 
 // MARK: - Background
 
-/// Slowly drifting, heavily blurred artwork. The blur is baked into a tiny
-/// image once per song and Core Animation moves it on the GPU at a low frame
-/// rate, so the background costs almost no CPU.
+/// Music.app's full-screen background: soft, blurred pieces of the cover
+/// drifting and turning over a fully blurred copy of the cover, darkened so
+/// white lyrics stay readable. Everything is Core Animation layers moved on
+/// the GPU at a low frame rate, so it costs almost no CPU.
 struct ImmersiveBackground: NSViewRepresentable {
     let palette: ArtworkPalette
 
@@ -745,15 +694,43 @@ struct ImmersiveBackground: NSViewRepresentable {
 }
 
 final class BackdropView: NSView {
-    private let base = CALayer()
-    private let layersSpec: [(scale: CGFloat, period: CFTimeInterval, reversed: Bool, opacity: Float, drift: CGPoint)] = [
-        (1.75, 140, false, 1.0, CGPoint(x: 0.05, y: -0.04)),
-        (1.25, 105, true, 0.65, CGPoint(x: -0.16, y: 0.12)),
-        (0.95, 80, false, 0.5, CGPoint(x: 0.2, y: 0.16))
+    /// One piece of the cover: its size (times the window's longest side),
+    /// drift period in seconds, resting centre and drift radii (fractions of
+    /// the window), phase, turning period (negative turns the other way)
+    /// and opacity.
+    private struct PieceSpec {
+        let size: CGFloat
+        let period: CFTimeInterval
+        let center: CGPoint
+        let radius: CGPoint
+        let phase: Double
+        let spin: CFTimeInterval
+        let opacity: Float
+    }
+
+    // In layer coordinates (origin bottom-left), matching the order of
+    // `ArtworkPalette.pieceRegions`: each piece rests over the part of the
+    // window where that part of the cover is.
+    private let specs: [PieceSpec] = [
+        PieceSpec(size: 0.95, period: 67, center: CGPoint(x: 0.24, y: 0.76), radius: CGPoint(x: 0.1, y: 0.08), phase: 0.0, spin: 83, opacity: 1),
+        PieceSpec(size: 0.95, period: 59, center: CGPoint(x: 0.76, y: 0.76), radius: CGPoint(x: 0.09, y: 0.1), phase: 2.1, spin: -97, opacity: 1),
+        PieceSpec(size: 0.95, period: 73, center: CGPoint(x: 0.24, y: 0.24), radius: CGPoint(x: 0.1, y: 0.09), phase: 4.0, spin: -71, opacity: 1),
+        PieceSpec(size: 0.95, period: 53, center: CGPoint(x: 0.76, y: 0.24), radius: CGPoint(x: 0.08, y: 0.1), phase: 1.2, spin: 89, opacity: 1),
+        PieceSpec(size: 0.8, period: 47, center: CGPoint(x: 0.5, y: 0.5), radius: CGPoint(x: 0.14, y: 0.1), phase: 3.3, spin: 61, opacity: 0.9)
     ]
-    private var artLayers: [CALayer] = []
+
+    private let base = CALayer()
+    /// The whole cover, blurred, under the pieces; slightly larger than the
+    /// window and turning slowly, so it fills any gaps between them.
+    private let art = CALayer()
+    private let artPeriod: CFTimeInterval = 160
+    private var pieces: [CALayer] = []
+    /// Darkens everything, and the edges a little more, so white lyrics stay
+    /// easy to read on any cover.
     private let shade = CALayer()
-    private var currentImage: CGImage?
+    private let vignette = CAGradientLayer()
+    private var currentPalette: ArtworkPalette?
+    private static let frameRate = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 24)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -763,20 +740,52 @@ final class BackdropView: NSView {
         root.masksToBounds = true
         layer = root
         root.addSublayer(base)
-        for (index, spec) in layersSpec.enumerated() {
-            let art = CALayer()
-            art.contentsGravity = .resizeAspectFill
-            art.magnificationFilter = .linear
-            art.minificationFilter = .linear
-            art.opacity = spec.opacity
-            // Different crops keep the three layers from moving in lockstep.
-            if index == 1 { art.contentsRect = CGRect(x: 0.15, y: 0.1, width: 0.7, height: 0.7) }
-            if index == 2 { art.contentsRect = CGRect(x: 0.0, y: 0.25, width: 0.6, height: 0.6) }
-            root.addSublayer(art)
-            artLayers.append(art)
+        for layer in [art] {
+            layer.contentsGravity = .resizeAspectFill
+            layer.magnificationFilter = .linear
+            layer.minificationFilter = .linear
         }
-        shade.backgroundColor = NSColor.black.withAlphaComponent(0.2).cgColor
+        root.addSublayer(art)
+        for spec in specs {
+            let piece = CALayer()
+            piece.contentsGravity = .resize
+            piece.magnificationFilter = .linear
+            piece.minificationFilter = .linear
+            piece.opacity = spec.opacity
+            root.addSublayer(piece)
+            pieces.append(piece)
+        }
         root.addSublayer(shade)
+        vignette.type = .radial
+        vignette.startPoint = CGPoint(x: 0.5, y: 0.5)
+        vignette.endPoint = CGPoint(x: 1, y: 1)
+        vignette.locations = [0, 0.55, 1]
+        root.addSublayer(vignette)
+        applyBrightness()
+        brightnessObserver = NotificationCenter.default.addObserver(
+            forName: BackgroundBrightness.didChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyBrightness() }
+        }
+    }
+
+    deinit {
+        if let brightnessObserver { NotificationCenter.default.removeObserver(brightnessObserver) }
+    }
+
+    private var brightnessObserver: NSObjectProtocol?
+
+    private func applyBrightness() {
+        let brightness = AppPreferences.backgroundBrightness
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.6)
+        shade.backgroundColor = NSColor.black.withAlphaComponent(brightness.shade).cgColor
+        vignette.colors = [
+            NSColor.black.withAlphaComponent(0).cgColor,
+            NSColor.black.withAlphaComponent(brightness.vignette * 0.25).cgColor,
+            NSColor.black.withAlphaComponent(brightness.vignette).cgColor
+        ]
+        CATransaction.commit()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -784,19 +793,22 @@ final class BackdropView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func apply(_ palette: ArtworkPalette) {
-        let baseColor = (palette.colors.first ?? .darkGray).cgColor
-        guard palette.backdrop !== currentImage || base.backgroundColor != baseColor else { return }
-        currentImage = palette.backdrop
-        let fade = CABasicAnimation(keyPath: "contents")
-        fade.duration = 1.2
-        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        guard palette != currentPalette else { return }
+        currentPalette = palette
         CATransaction.begin()
-        CATransaction.setAnimationDuration(1.2)
-        base.backgroundColor = baseColor
-        for art in artLayers {
-            art.add(fade, forKey: "fade")
-            art.contents = palette.backdrop
-            art.isHidden = palette.backdrop == nil
+        CATransaction.setAnimationDuration(1.4)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+        base.backgroundColor = (palette.colors.first ?? .darkGray).cgColor
+        let layers = [art] + pieces
+        let images: [CGImage?] = [palette.backdrop] + pieces.indices.map { index in
+            index < palette.pieces.count ? palette.pieces[index] : nil
+        }
+        for (layer, image) in zip(layers, images) {
+            let fade = CABasicAnimation(keyPath: "contents")
+            fade.duration = 1.4
+            layer.add(fade, forKey: "fade")
+            layer.contents = image
+            layer.isHidden = image == nil
         }
         CATransaction.commit()
     }
@@ -808,47 +820,103 @@ final class BackdropView: NSView {
         let bounds = self.bounds
         base.frame = bounds
         shade.frame = bounds
+        // A circle reaching the corners, so the vignette has no flat sides.
+        let diagonal = hypot(bounds.width, bounds.height)
+        vignette.bounds = CGRect(x: 0, y: 0, width: diagonal, height: diagonal)
+        vignette.position = CGPoint(x: bounds.midX, y: bounds.midY)
         let longest = max(bounds.width, bounds.height)
-        for (art, spec) in zip(artLayers, layersSpec) {
-            let side = longest * spec.scale
-            art.bounds = CGRect(x: 0, y: 0, width: side, height: side)
-            art.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        // Big enough that its corners never show while it turns.
+        let artSide = longest * 1.5
+        art.bounds = CGRect(x: 0, y: 0, width: artSide, height: artSide)
+        art.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        for (piece, spec) in zip(pieces, specs) {
+            let side = longest * spec.size
+            piece.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+            piece.position = piecePosition(spec, at: 0)
         }
         CATransaction.commit()
         startAnimations()
     }
 
-    private func startAnimations() {
-        let range = CAFrameRateRange(minimum: 10, maximum: 24, preferred: 20)
-        for (art, spec) in zip(artLayers, layersSpec) {
-            if art.animation(forKey: "spin") == nil {
-                let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-                spin.fromValue = 0
-                spin.toValue = (spec.reversed ? -2 : 2) * CGFloat.pi
-                spin.duration = spec.period
-                spin.repeatCount = .infinity
-                spin.isRemovedOnCompletion = false
-                spin.preferredFrameRateRange = range
-                art.add(spin, forKey: "spin")
-            }
-            art.removeAnimation(forKey: "drift")
-            let drift = CABasicAnimation(keyPath: "position")
-            let center = CGPoint(x: bounds.midX, y: bounds.midY)
-            drift.fromValue = NSValue(point: CGPoint(
-                x: center.x - bounds.width * spec.drift.x,
-                y: center.y - bounds.height * spec.drift.y
-            ))
-            drift.toValue = NSValue(point: CGPoint(
-                x: center.x + bounds.width * spec.drift.x,
-                y: center.y + bounds.height * spec.drift.y
-            ))
-            drift.duration = spec.period * 0.37
-            drift.autoreverses = true
-            drift.repeatCount = .infinity
-            drift.isRemovedOnCompletion = false
-            drift.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            drift.preferredFrameRateRange = range
-            art.add(drift, forKey: "drift")
+    /// Where a piece is at `time`: a slow figure-eight around its centre.
+    private func piecePosition(_ spec: PieceSpec, at time: CFTimeInterval) -> CGPoint {
+        let angle = 2 * Double.pi * time / spec.period + spec.phase
+        return CGPoint(
+            x: bounds.width * (spec.center.x + spec.radius.x * CGFloat(sin(angle))),
+            y: bounds.height * (spec.center.y + spec.radius.y * CGFloat(sin(2 * angle + spec.phase)))
+        )
+    }
+
+    private func pieceScale(_ spec: PieceSpec, at time: CFTimeInterval) -> CGFloat {
+        1 + 0.1 * CGFloat(sin(2 * Double.pi * time / (spec.period * 0.7) + spec.phase))
+    }
+
+    private func pieceAngle(_ spec: PieceSpec, at time: CFTimeInterval) -> CGFloat {
+        2 * CGFloat.pi * CGFloat(time / spec.spin)
+    }
+
+    /// Poses the layers as the animations would at `time`, without
+    /// animating. Used to render still frames for review.
+    func pose(at time: CFTimeInterval) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        art.removeAllAnimations()
+        art.transform = CATransform3DMakeRotation(2 * CGFloat.pi * CGFloat(time / artPeriod), 0, 0, 1)
+        for (piece, spec) in zip(pieces, specs) {
+            piece.removeAllAnimations()
+            piece.position = piecePosition(spec, at: time)
+            let scale = pieceScale(spec, at: time)
+            piece.transform = CATransform3DRotate(
+                CATransform3DMakeScale(scale, scale, 1), pieceAngle(spec, at: time), 0, 0, 1
+            )
         }
+        CATransaction.commit()
+    }
+
+    private func startAnimations() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if art.animation(forKey: "spin") == nil {
+            art.add(Self.spin(period: artPeriod), forKey: "spin")
+        }
+        let steps = 48
+        for (piece, spec) in zip(pieces, specs) {
+            let path = CAKeyframeAnimation(keyPath: "position")
+            path.values = (0...steps).map { step in
+                NSValue(point: piecePosition(spec, at: spec.period * Double(step) / Double(steps)))
+            }
+            path.calculationMode = .cubic
+            path.duration = spec.period
+            path.repeatCount = .infinity
+            path.isRemovedOnCompletion = false
+            path.preferredFrameRateRange = Self.frameRate
+            piece.add(path, forKey: "drift")
+
+            let breathe = CAKeyframeAnimation(keyPath: "transform.scale")
+            let breathPeriod = spec.period * 0.7
+            breathe.values = (0...steps).map { step in
+                pieceScale(spec, at: breathPeriod * Double(step) / Double(steps))
+            }
+            breathe.calculationMode = .cubic
+            breathe.duration = breathPeriod
+            breathe.repeatCount = .infinity
+            breathe.isRemovedOnCompletion = false
+            breathe.preferredFrameRateRange = Self.frameRate
+            piece.add(breathe, forKey: "breathe")
+
+            if piece.animation(forKey: "spin") == nil {
+                piece.add(Self.spin(period: spec.spin), forKey: "spin")
+            }
+        }
+    }
+
+    private static func spin(period: CFTimeInterval) -> CABasicAnimation {
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = period < 0 ? -2 * CGFloat.pi : 2 * CGFloat.pi
+        spin.duration = abs(period)
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        spin.preferredFrameRateRange = frameRate
+        return spin
     }
 }

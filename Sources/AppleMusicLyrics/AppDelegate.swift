@@ -125,9 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.immersive.toggle() }
         }
-#if !DEBUG
-        checkForUpdates(manual: false)
-#endif
+        // No automatic update checks: an upstream release would replace this
+        // customized build (full-screen lyrics, user translations).
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -163,8 +162,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 } else if manual {
                     self.presentMessage(
-                        title: "已是最新版本",
-                        message: "当前安装的 Apple Music Lyrics 已是最新版本。"
+                        title: "You’re Up to Date",
+                        message: "This copy of Apple Music Lyrics is the latest version."
                     )
                 }
             } catch {
@@ -175,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.logger.warning("Update check failed: \(error.localizedDescription)")
                 if manual {
                     self.presentMessage(
-                        title: "无法检查更新",
+                        title: "Couldn’t Check for Updates",
                         message: error.localizedDescription
                     )
                 }
@@ -187,11 +186,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "发现新版本 \(update.version)"
-        alert.informativeText = "可以从 GitHub 下载新版安装镜像，下载完成后会验证 SHA-256 校验值。"
-        alert.addButton(withTitle: "下载更新")
-        alert.addButton(withTitle: "查看发布页")
-        alert.addButton(withTitle: "稍后")
+        alert.messageText = "Version \(update.version) Is Available"
+        alert.informativeText = "The new disk image can be downloaded from GitHub. Its SHA-256 checksum is verified after download."
+        alert.addButton(withTitle: "Download Update")
+        alert.addButton(withTitle: "View Release Page")
+        alert.addButton(withTitle: "Later")
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -214,8 +213,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.menuBar.setCheckingForUpdates(false)
                 NSWorkspace.shared.activateFileViewerSelecting([fileURL])
                 self.presentMessage(
-                    title: "更新已下载",
-                    message: "安装镜像已通过完整性校验并保存到“下载”文件夹。"
+                    title: "Update Downloaded",
+                    message: "The disk image passed its integrity check and was saved to your Downloads folder."
                 )
             } catch {
                 guard !Task.isCancelled else { return }
@@ -223,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.updateTask = nil
                 self.menuBar.setCheckingForUpdates(false)
                 self.logger.warning("Update download failed: \(error.localizedDescription)")
-                self.presentMessage(title: "下载更新失败", message: error.localizedDescription)
+                self.presentMessage(title: "Couldn’t Download Update", message: error.localizedDescription)
             }
         }
     }
@@ -233,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "OK")
         alert.runModal()
     }
 
@@ -403,6 +402,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.onEditTranslations = { [weak self] track, lyrics in
             self?.editTranslations(for: track, lyrics: lyrics)
+        }
+        model.onSaveTranslations = { [weak self] track, changes in
+            guard let self else { return }
+            do {
+                try self.userStore.setTranslations(changes, for: track)
+                self.logger.info("Saved \(changes.count) translation correction(s) for \(track.displayName)")
+            } catch {
+                self.logger.error("Could not save translations: \(error.localizedDescription)")
+            }
+        }
+        model.onReloadLyrics = { [weak self] in
+            self?.reloadLyricsQuietly()
         }
 
         for directory in [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL] {

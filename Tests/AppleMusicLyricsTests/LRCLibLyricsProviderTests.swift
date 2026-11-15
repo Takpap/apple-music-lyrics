@@ -147,4 +147,49 @@ final class LRCLibLyricsProviderTests: XCTestCase {
         let document = await LRCLibLyricsProvider(fetch: recorder.fetch).lyrics(for: track)
         XCTAssertNil(document)
     }
+
+    func testRetriesRateLimitedRequests() async {
+        let calls = FetchRecorder { _ in (Data(), 0) }
+        let counter = Clock()
+        calls.responder = { _ in
+            counter.date = counter.date.addingTimeInterval(1)
+            if counter.date.timeIntervalSince1970 < 1_000_002 { return (Data(), 429) }
+            return ((try? JSONSerialization.data(withJSONObject: [
+                "duration": 200, "syncedLyrics": "[00:01.00]a"
+            ])) ?? Data(), 200)
+        }
+        let provider = LRCLibLyricsProvider(fetch: calls.fetch, sleep: { _ in })
+        let document = await provider.lyrics(for: track)
+        XCTAssertEqual(document?.lines.map(\.text), ["a"])
+        XCTAssertEqual(calls.paths, ["/api/get", "/api/get"])
+    }
+
+    func testSearchesAgainWithDecorationsStripped() async {
+        let decorated = TrackInfo(
+            title: "I Ain't Worried (Mixed)", artist: "OneRepublic & Friend", album: "A",
+            duration: 148, position: 0, state: .playing
+        )
+        let recorder = FetchRecorder { request in
+            let query = request.url?.query ?? ""
+            if request.url?.path == "/api/get" { return (Data("{}".utf8), 404) }
+            if query.contains("Mixed") { return (Data("[]".utf8), 200) }
+            return ((try? JSONSerialization.data(withJSONObject: [[
+                "duration": 147.5, "syncedLyrics": "[00:01.00]worried"
+            ]])) ?? Data(), 200)
+        }
+        let document = await LRCLibLyricsProvider(fetch: recorder.fetch, sleep: { _ in }).lyrics(for: decorated)
+        XCTAssertEqual(document?.lines.map(\.text), ["worried"])
+        XCTAssertEqual(recorder.paths, ["/api/get", "/api/search", "/api/search"])
+    }
+
+    func testSearchVariants() {
+        XCTAssertEqual(LRCLibLyricsProvider.strippedTitle("Rather Be (feat. Jess Glynne)"), "Rather Be")
+        XCTAssertEqual(LRCLibLyricsProvider.strippedTitle("You(th) [Demo]"), "You")
+        XCTAssertEqual(LRCLibLyricsProvider.strippedTitle("Song - Remastered 2011"), "Song")
+        XCTAssertEqual(LRCLibLyricsProvider.strippedTitle("(Intro)"), "(Intro)")
+        XCTAssertEqual(LRCLibLyricsProvider.primaryArtist("Sam Fender & Olivia Dean"), "Sam Fender")
+        XCTAssertEqual(LRCLibLyricsProvider.primaryArtist("Florence + the Machine"), "Florence + the Machine")
+        XCTAssertEqual(LRCLibLyricsProvider.searchVariants(title: "Song", artist: "A").count, 1)
+        XCTAssertEqual(LRCLibLyricsProvider.searchVariants(title: "Song (Live)", artist: "A, B").count, 4)
+    }
 }

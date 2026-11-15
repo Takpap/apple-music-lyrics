@@ -14,10 +14,10 @@ enum LyricsExportFormat: Int, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .lrc: return "LRC（逐行）"
-        case .enhancedLRC: return "LRC（逐字）"
-        case .srt: return "SRT 字幕"
-        case .plainText: return "纯文本"
+        case .lrc: return "LRC (line-timed)"
+        case .enhancedLRC: return "LRC (word-timed)"
+        case .srt: return "SRT Subtitles"
+        case .plainText: return "Plain Text"
         }
     }
 

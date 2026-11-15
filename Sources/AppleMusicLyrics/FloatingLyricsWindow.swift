@@ -32,7 +32,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
     var isVisible: Bool { panel.isVisible }
 
     override init() {
-        panel = NSPanel(
+        panel = ButtonlessPanel(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
@@ -68,9 +68,7 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
         panel.hasShadow = true
         panel.animationBehavior = .utilityWindow
         panel.acceptsMouseMovedEvents = true
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.hideStandardButtons()
     }
 
     private func configureContent() {
@@ -274,10 +272,14 @@ final class FloatingLyricsController: NSObject, NSWindowDelegate {
         let locked = AppPreferences.floatingLyricsLocked
         let clickThrough = AppPreferences.floatingLyricsClickThrough
         panel.isMovableByWindowBackground = !locked
-        if locked {
-            panel.styleMask.remove(.resizable)
-        } else {
-            panel.styleMask.insert(.resizable)
+        // Only touch the style when it changes: each change rebuilds the
+        // title bar, and this runs on every Option key press.
+        if locked == panel.styleMask.contains(.resizable) {
+            if locked {
+                panel.styleMask.remove(.resizable)
+            } else {
+                panel.styleMask.insert(.resizable)
+            }
         }
         panel.ignoresMouseEvents = (locked || clickThrough) && !optionHeld
         panel.hasShadow = !locked

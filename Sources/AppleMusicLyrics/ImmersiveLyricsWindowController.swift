@@ -32,7 +32,7 @@ final class ImmersiveLyricsWindowController: NSObject, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if !window.isVisible {
-            if let screen = NSScreen.main ?? NSScreen.screens.first {
+            if let screen = Self.preferredScreen() {
                 window.setFrame(screen.visibleFrame.insetBy(dx: screen.visibleFrame.width * 0.08, dy: screen.visibleFrame.height * 0.08), display: false)
             }
             window.alphaValue = 0
@@ -49,6 +49,30 @@ final class ImmersiveLyricsWindowController: NSObject, NSWindowDelegate {
             }
         } else {
             window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// The Mac's own display when "Open on Mac's Display" is on (the
+    /// default) or `--screen=builtin` / `AML_SCREEN=builtin` is given;
+    /// otherwise, or with no built-in display, the display with the active
+    /// window. `--screen=main` forces the latter.
+    static func preferredScreen() -> NSScreen? {
+        let argument = CommandLine.arguments
+            .first { $0.hasPrefix("--screen=") }
+            .map { String($0.dropFirst("--screen=".count)) }
+            ?? ProcessInfo.processInfo.environment["AML_SCREEN"]
+        let wantsBuiltIn = argument.map { $0 == "builtin" } ?? AppPreferences.immersiveOnBuiltInDisplay
+        if wantsBuiltIn, let builtIn = builtInScreen() {
+            return builtIn
+        }
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    static func builtInScreen() -> NSScreen? {
+        NSScreen.screens.first { screen in
+            let key = NSDeviceDescriptionKey("NSScreenNumber")
+            guard let id = screen.deviceDescription[key] as? CGDirectDisplayID else { return false }
+            return CGDisplayIsBuiltin(id) != 0
         }
     }
 
@@ -71,15 +95,25 @@ final class ImmersiveLyricsWindowController: NSObject, NSWindowDelegate {
             window.animator().alphaValue = 0
         }, completionHandler: {
             MainActor.assumeIsolated {
+                // Reopened while fading out: keep the window.
+                guard !self.model.isActive else {
+                    window.alphaValue = 1
+                    return
+                }
                 window.orderOut(nil)
-                window.alphaValue = 1
                 NSApp.setActivationPolicy(.accessory)
+                // Drop the window and its SwiftUI tree so a closed player
+                // costs no memory; show() builds a fresh one.
+                window.delegate = nil
+                window.contentView = nil
+                if self.window === window { self.window = nil }
+                self.model.releaseArtwork()
             }
         })
     }
 
     private func makeWindow() -> NSWindow {
-        let window = NSWindow(
+        let window = ButtonlessWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -95,9 +129,7 @@ final class ImmersiveLyricsWindowController: NSObject, NSWindowDelegate {
         window.appearance = NSAppearance(named: .darkAqua)
         window.acceptsMouseMovedEvents = true
         window.delegate = self
-        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(button)?.isHidden = true
-        }
+        window.hideStandardButtons()
         let hosting = NSHostingView(rootView: ImmersiveLyricsRootView(model: model))
         hosting.sizingOptions = []
         window.contentView = hosting
@@ -174,12 +206,26 @@ final class ImmersiveLyricsWindowController: NSObject, NSWindowDelegate {
         return false
     }
 
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        window?.hideStandardButtons()
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        window?.hideStandardButtons()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        window?.hideStandardButtons()
+    }
+
     func windowDidExitFullScreen(_ notification: Notification) {
+        window?.hideStandardButtons()
         guard closeAfterExitingFullScreen, let window else { return }
         finishHiding(window)
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
+        window?.hideStandardButtons()
         model.pokeChrome()
     }
 }

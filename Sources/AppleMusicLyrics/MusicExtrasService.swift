@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 
 enum MusicRepeatMode: String, Equatable, Sendable {
     case off
@@ -28,6 +29,16 @@ struct MusicExtras: Equatable, Sendable {
     var repeatMode: MusicRepeatMode = .off
     var volume: Double = 50
     var favorited = false
+}
+
+/// One of Music's AirPlay outputs, the Mac's own speakers included.
+struct MusicAirPlayDevice: Equatable, Sendable {
+    let name: String
+    let kind: String
+    let selected: Bool
+    let available: Bool
+
+    var isComputer: Bool { kind == "computer" }
 }
 
 /// Reads and changes the Music.app state the immersive player shows besides
@@ -78,6 +89,60 @@ final class MusicExtrasService: @unchecked Sendable {
         end tell
         """)
 
+    private lazy var airPlayScript = NSAppleScript(source: """
+        tell application "Music"
+            set delim to "\(delimiter)"
+            set out to ""
+            repeat with device in AirPlay devices
+                try
+                    set out to out & (name of device) & delim & (kind of device as text) & delim & (selected of device as text) & delim & (available of device as text) & linefeed
+                end try
+            end repeat
+            return out
+        end tell
+        """)
+
+    /// Music's AirPlay outputs, as its own AirPlay menu lists them.
+    func fetchAirPlayDevices(completion: @escaping ([MusicAirPlayDevice]) -> Void) {
+        queue.async { [self] in
+            var devices: [MusicAirPlayDevice] = []
+            if Self.isMusicRunning, let airPlayScript {
+                var error: NSDictionary?
+                let raw = airPlayScript.executeAndReturnError(&error).stringValue ?? ""
+                if error == nil { devices = Self.parseAirPlayDevices(raw, delimiter: delimiter) }
+            }
+            DispatchQueue.main.async { completion(devices) }
+        }
+    }
+
+    static func parseAirPlayDevices(_ raw: String, delimiter: String) -> [MusicAirPlayDevice] {
+        raw.components(separatedBy: .newlines).compactMap { row in
+            let fields = row.components(separatedBy: delimiter)
+            guard fields.count >= 4, !fields[0].isEmpty else { return nil }
+            return MusicAirPlayDevice(
+                name: fields[0],
+                kind: fields[1].lowercased(),
+                selected: fields[2].lowercased() == "true",
+                available: fields[3].lowercased() == "true"
+            )
+        }
+    }
+
+    /// Plays to exactly these outputs (Music allows several at once).
+    func setAirPlayDevices(named names: [String], completion: (() -> Void)? = nil) {
+        guard !names.isEmpty else { return }
+        let list = names.map { "AirPlay device \"\(Self.appleScriptEscaped($0))\"" }.joined(separator: ", ")
+        let source = "tell application \"Music\" to set current AirPlay devices to {\(list)}"
+        queue.async {
+            _ = AppleScriptRunner.run(source)
+            if let completion { DispatchQueue.main.async(execute: completion) }
+        }
+    }
+
+    static func appleScriptEscaped(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     func fetchExtras(completion: @escaping (MusicExtras?) -> Void) {
         queue.async { [self] in
             guard Self.isMusicRunning, let extrasScript else {
@@ -111,16 +176,36 @@ final class MusicExtrasService: @unchecked Sendable {
                 if error == nil {
                     let data = descriptor.data
                     if data.count > 64 {
-                        image = NSImage(data: data)
+                        image = Self.decodeArtwork(data)
                     }
                 }
             }
             if image == nil, let fallbackURL,
                let data = try? Data(contentsOf: fallbackURL) {
-                image = NSImage(data: data)
+                image = Self.decodeArtwork(data)
             }
             DispatchQueue.main.async { completion(image) }
         }
+    }
+
+    /// Largest artwork side kept in memory, in pixels. The cover is drawn at
+    /// most about 480 points wide, so this is enough for a 2x display.
+    static let maxArtworkPixels = 1000
+
+    /// Decodes artwork straight to a bounded bitmap. Music hands over the
+    /// original file, often 3000 px or more, which as a full bitmap is ~36 MB.
+    static func decodeArtwork(_ data: Data) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxArtworkPixels
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
     func setShuffle(_ enabled: Bool) {

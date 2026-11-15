@@ -141,6 +141,9 @@ final class ImmersiveLyricsModel: ObservableObject {
     var onRevealLyricsFolder: (() -> Void)?
     var onShowCompactLyrics: (() -> Void)?
     var onClose: (() -> Void)?
+    /// Called when the playback position jumps (seek, track change, resync),
+    /// so views animating the clock on their own can resync.
+    var onClockJump: (() -> Void)?
 
     private static let showTranslationKey = "immersiveLyrics.showTranslation"
     /// Lines move slightly before they are sung, as in Music.app.
@@ -170,14 +173,23 @@ final class ImmersiveLyricsModel: ObservableObject {
         guard !isActive else { return }
         isActive = true
         tick()
+        // Volume, shuffle, repeat and favourite come from an AppleScript
+        // call that costs CPU here and in Music: every 3 s while the
+        // controls are on screen, otherwise every 15 s.
         let extras = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshExtras() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.chromeVisible || CACurrentMediaTime() - self.lastExtrasFetch >= 15 {
+                    self.refreshExtras()
+                }
+            }
         }
         RunLoop.main.add(extras, forMode: .common)
         extrasTimer = extras
         refreshExtras()
         loadArtworkIfNeeded(force: true)
         pokeChrome()
+        offerDownloadOnce()
     }
 
     func deactivate() {
@@ -186,6 +198,14 @@ final class ImmersiveLyricsModel: ObservableObject {
         tickTimer = nil
         extrasTimer?.invalidate()
         extrasTimer = nil
+    }
+
+    /// Frees the cover image once the window is gone; `activate()` loads it
+    /// again. The palette is kept so the next open starts in the right colors.
+    func releaseArtwork() {
+        guard !isActive else { return }
+        artwork = nil
+        artworkTrackKey = nil
     }
 
     // MARK: - Input from the app delegate
@@ -254,16 +274,21 @@ final class ImmersiveLyricsModel: ObservableObject {
         let playing = sample.state == .playing
         let estimated = position(at: now)
         let error = sample.position - estimated
+        var jumped = false
         if !trackChanged, playing, isPlaying, abs(error) < 0.75 {
             basePosition = estimated + error * 0.08
         } else {
+            jumped = abs(error) > 0.3 || trackChanged
             basePosition = sample.position
         }
         sampledAt = now
         if isPlaying != playing {
             isPlaying = playing
             tick()
+        } else if jumped {
+            tick()
         }
+        if jumped { onClockJump?() }
     }
 
     func position(at now: CFTimeInterval = CACurrentMediaTime()) -> TimeInterval {
@@ -341,8 +366,11 @@ final class ImmersiveLyricsModel: ObservableObject {
         }
     }
 
+    private var lastExtrasFetch: CFTimeInterval = 0
+
     private func refreshExtras() {
         guard isActive, CACurrentMediaTime() >= pendingExtrasUntil else { return }
+        lastExtrasFetch = CACurrentMediaTime()
         extrasService.fetchExtras { [weak self] extras in
             guard let self, let extras, CACurrentMediaTime() >= self.pendingExtrasUntil else { return }
             if self.extras != extras { self.extras = extras }
@@ -365,6 +393,7 @@ final class ImmersiveLyricsModel: ObservableObject {
         sampledAt = CACurrentMediaTime()
         endManualScroll(animated: true)
         tick()
+        onClockJump?()
         onSeek?(clamped)
     }
 
@@ -403,6 +432,14 @@ final class ImmersiveLyricsModel: ObservableObject {
     }
 
     func openMusic() { extrasService.activateMusic() }
+
+    func fetchAirPlayDevices(completion: @escaping ([MusicAirPlayDevice]) -> Void) {
+        extrasService.fetchAirPlayDevices(completion: completion)
+    }
+
+    func setAirPlayDevices(named names: [String], completion: (() -> Void)? = nil) {
+        extrasService.setAirPlayDevices(named: names, completion: completion)
+    }
 
     /// Used by snapshot tests and previews, where Music.app is not queried.
     func setArtworkForPreview(_ image: NSImage) {
@@ -481,8 +518,11 @@ final class ImmersiveLyricsModel: ObservableObject {
 
     private func refreshDownloadableLanguage() {
         let snapshot = document
+        // Offer the download whenever some lines still lack a translation:
+        // a song can have a few lines translated (by Apple or by hand) and
+        // the rest waiting on the language model.
         guard snapshot.isSynced, !snapshot.lines.isEmpty,
-              !snapshot.lines.contains(where: { $0.translation != nil }) else {
+              snapshot.lines.contains(where: { $0.translation == nil }) else {
             if downloadableLanguage != nil { downloadableLanguage = nil }
             return
         }
@@ -490,7 +530,19 @@ final class ImmersiveLyricsModel: ObservableObject {
             let language = await OnDeviceLyricsTranslator.downloadableSourceLanguage(for: snapshot)
             guard let self, self.document == snapshot else { return }
             if self.downloadableLanguage != language { self.downloadableLanguage = language }
+            self.offerDownloadOnce()
         }
+    }
+
+    /// The first time a song in a language that isn't downloaded yet plays
+    /// in the full-screen player, shows macOS's download prompt for it
+    /// once; after that the download stays a button.
+    private func offerDownloadOnce() {
+        guard isActive, let language = downloadableLanguage,
+              !AppPreferences.translationDownloadsOffered.contains(language) else { return }
+        AppPreferences.translationDownloadsOffered.insert(language)
+        DiagnosticLogger.shared.info("Offering on-device translation download; language=\(language)")
+        requestTranslationDownload()
     }
 
     var downloadableLanguageName: String? {
@@ -513,6 +565,8 @@ final class ImmersiveLyricsModel: ObservableObject {
     func pokeChrome() {
         if !chromeVisible {
             withAnimation(.easeOut(duration: 0.25)) { chromeVisible = true }
+            // The controls were hidden, so their values may be stale.
+            if CACurrentMediaTime() - lastExtrasFetch > 2 { refreshExtras() }
         }
         chromeHideWork?.cancel()
         let work = DispatchWorkItem { [weak self] in

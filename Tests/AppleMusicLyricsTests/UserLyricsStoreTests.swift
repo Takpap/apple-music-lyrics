@@ -163,4 +163,54 @@ final class UserLyricsStoreTests: XCTestCase {
         try store.setTranslations([(original: "Ma love story", translation: "")], for: track)
         XCTAssertNil(store.translations(for: track)["ma love story"])
     }
+
+    func testTranslationsFallBackToLooseMatch() {
+        let doc = LyricsDocument(
+            lines: [
+                LyricLine(time: 1, text: "Tu ne m’entends pas,", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 2, text: "Dernière danse", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 3, text: "Ох уж этот яд", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 4, text: "Something else", words: [], translation: nil, transliteration: nil)
+            ],
+            plainText: nil, source: "LRCLIB", isSynced: true, wordTiming: .none
+        )
+        let applied = store.applyingTranslations([
+            "tu ne m'entends pas": "You don't hear me",
+            "Derniere danse!": "Last dance",
+            "Ох, уж этот яд…": "Oh, this poison"
+        ], to: doc)
+        XCTAssertEqual(applied.lines.map(\.translation), ["You don't hear me", "Last dance", "Oh, this poison", nil])
+        XCTAssertEqual(UserLyricsStore.looseKey("  L'âme   en peine… "), "lame en peine")
+    }
+
+    func testMergedLinesJoinTheirRowsAndAdLibsAreIgnored() {
+        let doc = LyricsDocument(
+            lines: [
+                LyricLine(time: 1, text: "Le chat dort, que la pluie tombe", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 2, text: "Le vent chante, yeah", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 3, text: "Le chat dort (le chat dort)", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 4, text: "Le chat dort et rien d'autre", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 5, text: "Trop fort, tu vises le prix", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 6, text: "J'me lève et j'vois la mer", words: [], translation: nil, transliteration: nil),
+                LyricLine(time: 7, text: "Le vent danse", words: [], translation: nil, transliteration: nil)
+            ],
+            plainText: nil, source: "Apple Music", isSynced: true, wordTiming: .none
+        )
+        let applied = store.applyingTranslations([
+            "Le chat dort": "The cat sleeps",
+            "Que la pluie tombe": "That the rain falls",
+            "Le vent chante": "The wind sings",
+            "Trop fort tu vises the prix": "Too strong, you aim for the prize",
+            "Je me lève et je vois la mer": "I get up and I see the sea"
+        ], to: doc)
+        XCTAssertEqual(applied.lines.map(\.translation), [
+            "The cat sleeps, that the rain falls",
+            "The wind sings",
+            "The cat sleeps",
+            nil,
+            "Too strong, you aim for the prize",
+            "I get up and I see the sea",
+            nil
+        ])
+    }
 }
