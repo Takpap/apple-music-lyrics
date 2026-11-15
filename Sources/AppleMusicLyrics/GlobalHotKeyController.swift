@@ -5,6 +5,7 @@ final class GlobalHotKeyController {
     private enum HotKeyID: UInt32 {
         case toggleFloating = 1
         case toggleLock = 2
+        case toggleImmersive = 3
     }
 
     private static let signature: OSType = 0x414D4C59 // AMLY
@@ -14,6 +15,7 @@ final class GlobalHotKeyController {
 
     var onToggleFloating: (() -> Void)?
     var onToggleLock: (() -> Void)?
+    var onToggleImmersive: (() -> Void)?
 
     init() {
         var eventType = EventTypeSpec(
@@ -44,6 +46,11 @@ final class GlobalHotKeyController {
             keyCode: UInt32(kVK_ANSI_K),
             modifiers: UInt32(controlKey | optionKey),
             id: .toggleLock
+        )
+        register(
+            keyCode: UInt32(kVK_ANSI_F),
+            modifiers: UInt32(controlKey | optionKey),
+            id: .toggleImmersive
         )
     }
 
@@ -86,6 +93,7 @@ final class GlobalHotKeyController {
         switch id {
         case .toggleFloating: onToggleFloating?()
         case .toggleLock: onToggleLock?()
+        case .toggleImmersive: onToggleImmersive?()
         }
         return noErr
     }

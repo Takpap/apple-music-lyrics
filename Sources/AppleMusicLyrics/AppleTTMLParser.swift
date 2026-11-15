@@ -6,12 +6,19 @@ struct ParsedAppleTTML: Equatable {
 }
 
 enum AppleTTMLParser {
-    static func parse(_ content: String) throws -> ParsedAppleTTML {
+    /// Parses Apple's lyric TTML. Translations and transliterations that
+    /// Apple embeds in `<head>` (keyed to lines by `itunes:key`) are attached
+    /// to the matching lines; a translation is used only when its language
+    /// matches one of `preferredLanguages`.
+    static func parse(
+        _ content: String,
+        preferredLanguages: [String] = Locale.preferredLanguages
+    ) throws -> ParsedAppleTTML {
         guard let data = content.data(using: .utf8) else {
             throw ParseError.invalidEncoding
         }
 
-        let delegate = TTMLDelegate()
+        let delegate = TTMLDelegate(preferredLanguages: preferredLanguages)
         let parser = XMLParser(data: data)
         parser.delegate = delegate
         parser.shouldProcessNamespaces = true
@@ -36,6 +43,20 @@ enum AppleTTMLParser {
         private var line: LineBuilder?
         private var spans: [SpanBuilder] = []
 
+        // Embedded <translations> / <transliterations> from <head>.
+        private let preferredLanguages: [String]
+        private var translationSets: [(language: String, texts: [String: String])] = []
+        private var transliterationSets: [(language: String, texts: [String: String])] = []
+        private var currentSet: (isTransliteration: Bool, language: String, texts: [String: String])?
+        private var currentTextKey: String?
+        private var currentTextBuffer = ""
+        private var chosenTranslations: [String: String] = [:]
+        private var chosenTransliterations: [String: String] = [:]
+
+        init(preferredLanguages: [String]) {
+            self.preferredLanguages = preferredLanguages
+        }
+
         func parser(
             _ parser: XMLParser,
             didStartElement elementName: String,
@@ -47,14 +68,19 @@ enum AppleTTMLParser {
             let name = localName(elementName, qualifiedName: qName)
             if name == "body" {
                 bodyDepth = depth
+                chooseEmbeddedSets()
                 return
             }
-            guard bodyDepth != nil else { return }
+            guard bodyDepth != nil else {
+                startHeadElement(name, attributes: attributeDict)
+                return
+            }
 
             if name == "p" {
                 line = LineBuilder(
                     start: time(attributeDict["begin"]),
-                    end: time(attributeDict["end"])
+                    end: time(attributeDict["end"]),
+                    key: attribute("key", in: attributeDict)
                 )
                 spans.removeAll(keepingCapacity: true)
             } else if name == "span", line != nil, let start = time(attributeDict["begin"]) {
@@ -78,6 +104,11 @@ enum AppleTTMLParser {
             qualifiedName qName: String?
         ) {
             let name = localName(elementName, qualifiedName: qName)
+            if bodyDepth == nil {
+                endHeadElement(name)
+                depth -= 1
+                return
+            }
 
             if name == "span", spans.last?.depth == depth, let span = spans.popLast() {
                 flush(span: span)
@@ -92,6 +123,10 @@ enum AppleTTMLParser {
         }
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
+            if currentTextKey != nil {
+                currentTextBuffer += string
+                return
+            }
             guard line != nil else { return }
             if !spans.isEmpty {
                 spans[spans.count - 1].text += string
@@ -145,15 +180,90 @@ enum AppleTTMLParser {
             let text = line.words.map(\.text).joined()
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             let start = line.start ?? line.words[0].start
+            let translation = line.key.flatMap { chosenTranslations[$0] }
+            let transliteration = line.key.flatMap { chosenTransliterations[$0] }
             lines.append(
                 LyricLine(
                     time: start,
                     text: text,
                     words: line.words.map {
                         LyricWord(text: $0.text, start: $0.start, end: $0.end)
-                    }
+                    },
+                    translation: translation,
+                    transliteration: transliteration
                 )
             )
+        }
+
+        // MARK: Embedded translations
+
+        private func startHeadElement(_ name: String, attributes: [String: String]) {
+            switch name {
+            case "translation", "transliteration":
+                currentSet = (
+                    isTransliteration: name == "transliteration",
+                    language: attribute("lang", in: attributes) ?? "",
+                    texts: [:]
+                )
+            case "text" where currentSet != nil:
+                currentTextKey = attribute("for", in: attributes)
+                currentTextBuffer = ""
+            default:
+                break
+            }
+        }
+
+        private func endHeadElement(_ name: String) {
+            switch name {
+            case "text":
+                if let key = currentTextKey, currentSet != nil {
+                    let text = AppleTTMLParser.normalizedWhitespace(currentTextBuffer)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !text.isEmpty { currentSet?.texts[key] = text }
+                }
+                currentTextKey = nil
+                currentTextBuffer = ""
+            case "translation", "transliteration":
+                if let set = currentSet, !set.texts.isEmpty {
+                    if set.isTransliteration {
+                        transliterationSets.append((set.language, set.texts))
+                    } else {
+                        translationSets.append((set.language, set.texts))
+                    }
+                }
+                currentSet = nil
+            default:
+                break
+            }
+        }
+
+        private func chooseEmbeddedSets() {
+            let preferred = preferredLanguages.map(Self.languageCode)
+            for code in preferred {
+                if let match = translationSets.first(where: { Self.languageCode($0.language) == code }) {
+                    chosenTranslations = match.texts
+                    break
+                }
+            }
+            chosenTransliterations = (
+                transliterationSets.first { $0.language.lowercased().contains("latn") }
+                    ?? transliterationSets.first
+            )?.texts ?? [:]
+        }
+
+        private static func languageCode(_ identifier: String) -> String {
+            identifier
+                .split(whereSeparator: { $0 == "-" || $0 == "_" })
+                .first
+                .map { $0.lowercased() } ?? ""
+        }
+
+        /// Attribute lookup that ignores the namespace prefix ("itunes:key", "xml:lang").
+        private func attribute(_ name: String, in attributes: [String: String]) -> String? {
+            if let value = attributes[name] { return value }
+            return attributes.first { key, _ in
+                key.split(separator: ":").last.map(String.init) == name
+            }?.value
         }
 
         private func localName(_ elementName: String, qualifiedName: String?) -> String {
@@ -181,7 +291,7 @@ enum AppleTTMLParser {
         }
     }
 
-    private static func normalizedWhitespace(_ text: String) -> String {
+    fileprivate static func normalizedWhitespace(_ text: String) -> String {
         var result = ""
         var previousWasWhitespace = false
         for character in text {
@@ -214,6 +324,7 @@ enum AppleTTMLParser {
     private struct LineBuilder {
         let start: TimeInterval?
         let end: TimeInterval?
+        var key: String?
         var pendingText = ""
         var words: [MutableWord] = []
     }

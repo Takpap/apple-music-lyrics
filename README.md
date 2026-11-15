@@ -19,6 +19,7 @@ https://github.com/user-attachments/assets/0540ded7-f40e-46ad-a44f-2382c24b169a
 
 - Native AppKit menu bar app with no Dock icon
 - Word-timed karaoke highlighting from Apple Music TTML
+- English fallback translations generated on-device when Apple has no translation
 - Smooth 60 fps status bar highlighting between playback samples
 - Adaptive status bar width for MacBooks and notched displays
 - Long lines scroll inside the status item instead of hiding other menu bar icons
@@ -45,6 +46,9 @@ app; Apple does not necessarily provide a separate timestamp for every character
 Music.app --AppleScript--> track metadata and playback position
     |
     +--local CFNetwork cache--> Apple catalog JSON + word-timed TTML
+                                      |
+                                      v
+                         English fallback if Apple translation is missing
                                       |
                                       v
                          status bar and floating lyrics
@@ -241,6 +245,7 @@ Sources/AppleMusicLyrics/
   NowPlayingService.swift               Music.app AppleScript integration
   AppleMusicCacheLyricsProvider.swift   Cache index and track matching
   AppleTTMLParser.swift                 TTML line and word timing parser
+  OnDeviceLyricsTranslator.swift        English translation fallback
   KaraokeRenderer.swift                 Floating-panel highlighting
   MenuBarController.swift               Status item and smooth title renderer
   FloatingLyricsWindow.swift            Floating lyrics panel
@@ -250,7 +255,7 @@ Sources/AppleMusicLyrics/
   DiagnosticLogger.swift               Bounded local troubleshooting log
   AppleScriptRunner.swift               AppleScript execution helper
 
-Tests/AppleMusicLyricsTests/             Unit and opt-in integration tests
+Tests/AppleMusicLyricsTests/             Unit, translation, and opt-in integration tests
 Resources/AppIcon.png                    App icon source image
 Resources/AppIcon.icns                   macOS application bundle icon
 scripts/run.sh                           Release build and direct launch
@@ -267,6 +272,16 @@ scripts/create-release-artifacts.sh      Universal ZIP and DMG creation
 - A cache miss is not automatically fetched by this app; it only rescans locally.
 - Status bar items cannot use the application-menu area to the left of a MacBook notch.
 - The app bundle is ad-hoc signed for local use, not notarized for distribution.
+
+## English translations
+
+When Apple Music's cached lyrics do not include an English translation, the
+overlay detects the lyric language and uses Apple's Translation framework with
+an installed language pair. The original Apple lyric text and TTML timestamps
+remain unchanged; translated text appears beneath each timed line. Lyrics are
+not sent to a third-party translation service. Translation requires macOS 26 or
+later and an installed source-to-English language pair. Apple-provided
+translations take precedence.
 
 ## Contributing
 

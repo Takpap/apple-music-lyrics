@@ -2,8 +2,13 @@ import AppKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let toggleImmersiveNotification = Notification.Name("local.applemusiclyrics.toggleFullScreenLyrics")
+
     private let menuBar = MenuBarController()
     private let floating = FloatingLyricsController()
+    private let immersive = ImmersiveLyricsWindowController()
+    private let userStore = UserLyricsStore()
+    private var userFilesWatcher: DirectoryWatcher?
     private let playbackMonitor = PlaybackMonitor()
     private let lyricsService = LyricsService()
     private let playbackController = MusicPlaybackController()
@@ -81,6 +86,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         globalHotKeys.onToggleLock = { [weak self] in
             self?.floating.toggleLocked()
         }
+        globalHotKeys.onToggleImmersive = { [weak self] in
+            self?.immersive.toggle()
+        }
+        menuBar.onToggleImmersive = { [weak self] in
+            self?.immersive.toggle()
+        }
+        configureImmersive()
 
         floating.onVisibilityChanged = { [weak self] visible in
             AppPreferences.floatingLyricsVisible = visible
@@ -101,7 +113,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.apply(status: .idle)
         floating.apply(status: .idle)
         playbackMonitor.start()
-        checkForUpdates(manual: false)
+        if CommandLine.arguments.contains("--full-screen-lyrics") {
+            DispatchQueue.main.async { self.immersive.show() }
+        }
+        // A second launch (e.g. `open -n … --args --full-screen-lyrics` from a
+        // Shortcut) asks the running copy to toggle the full-screen lyrics.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Self.toggleImmersiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.immersive.toggle() }
+        }
+        // No automatic update checks: an upstream release would replace this
+        // customized build (full-screen lyrics, user translations).
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -137,8 +162,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 } else if manual {
                     self.presentMessage(
-                        title: "已是最新版本",
-                        message: "当前安装的 Apple Music Lyrics 已是最新版本。"
+                        title: "You’re Up to Date",
+                        message: "This copy of Apple Music Lyrics is the latest version."
                     )
                 }
             } catch {
@@ -149,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.logger.warning("Update check failed: \(error.localizedDescription)")
                 if manual {
                     self.presentMessage(
-                        title: "无法检查更新",
+                        title: "Couldn’t Check for Updates",
                         message: error.localizedDescription
                     )
                 }
@@ -161,11 +186,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "发现新版本 \(update.version)"
-        alert.informativeText = "可以从 GitHub 下载新版安装镜像，下载完成后会验证 SHA-256 校验值。"
-        alert.addButton(withTitle: "下载更新")
-        alert.addButton(withTitle: "查看发布页")
-        alert.addButton(withTitle: "稍后")
+        alert.messageText = "Version \(update.version) Is Available"
+        alert.informativeText = "The new disk image can be downloaded from GitHub. Its SHA-256 checksum is verified after download."
+        alert.addButton(withTitle: "Download Update")
+        alert.addButton(withTitle: "View Release Page")
+        alert.addButton(withTitle: "Later")
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
@@ -188,8 +213,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.menuBar.setCheckingForUpdates(false)
                 NSWorkspace.shared.activateFileViewerSelecting([fileURL])
                 self.presentMessage(
-                    title: "更新已下载",
-                    message: "安装镜像已通过完整性校验并保存到“下载”文件夹。"
+                    title: "Update Downloaded",
+                    message: "The disk image passed its integrity check and was saved to your Downloads folder."
                 )
             } catch {
                 guard !Task.isCancelled else { return }
@@ -197,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.updateTask = nil
                 self.menuBar.setCheckingForUpdates(false)
                 self.logger.warning("Update download failed: \(error.localizedDescription)")
-                self.presentMessage(title: "下载更新失败", message: error.localizedDescription)
+                self.presentMessage(title: "Couldn’t Download Update", message: error.localizedDescription)
             }
         }
     }
@@ -207,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: "OK")
         alert.runModal()
     }
 
@@ -287,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if isLoadingLyrics {
+        if isLoadingLyrics, currentLyrics.lines.isEmpty, (currentLyrics.plainText ?? "").isEmpty {
             apply(showsLoadingState ? .loadingLyrics(track) : .noLyrics(track))
             return
         }
@@ -339,6 +364,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         playbackMonitor.sampleNow()
     }
 
+    /// Reloads lyrics for the current track without clearing what is shown,
+    /// e.g. after the user saves a translation or lyrics file.
+    private func reloadLyricsQuietly() {
+        guard let track = latestTrack, !isLoadingLyrics else { return }
+        logger.info("User lyrics files changed; reloading quietly")
+        loadLyrics(for: track, showLoading: false)
+    }
+
+    // MARK: - Full-screen lyrics
+
+    private func configureImmersive() {
+        let model = immersive.model
+        model.onSeek = { [weak self] position in
+            self?.playbackController.seek(to: position) {
+                self?.playbackMonitor.sampleNow()
+            }
+        }
+        model.onPreviousTrack = { [weak self] in
+            self?.playbackController.previousTrack { self?.playbackMonitor.sampleNow() }
+        }
+        model.onTogglePlayPause = { [weak self] in
+            self?.playbackController.togglePlayPause { self?.playbackMonitor.sampleNow() }
+        }
+        model.onNextTrack = { [weak self] in
+            self?.playbackController.nextTrack { self?.playbackMonitor.sampleNow() }
+        }
+        model.onRefreshLyrics = { [weak self] in
+            self?.forceRefreshLyrics()
+        }
+        model.onShowCompactLyrics = { [weak self] in
+            self?.immersive.hide()
+            self?.floating.setVisible(true)
+        }
+        model.onRevealLyricsFolder = { [weak self] in
+            self?.revealUserLyricsFolder()
+        }
+        model.onEditTranslations = { [weak self] track, lyrics in
+            self?.editTranslations(for: track, lyrics: lyrics)
+        }
+        model.onSaveTranslations = { [weak self] track, changes in
+            guard let self else { return }
+            do {
+                try self.userStore.setTranslations(changes, for: track)
+                self.logger.info("Saved \(changes.count) translation correction(s) for \(track.displayName)")
+            } catch {
+                self.logger.error("Could not save translations: \(error.localizedDescription)")
+            }
+        }
+        model.onReloadLyrics = { [weak self] in
+            self?.reloadLyricsQuietly()
+        }
+
+        for directory in [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL] {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        userFilesWatcher = DirectoryWatcher(
+            urls: [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL]
+        ) { [weak self] in
+            self?.reloadLyricsQuietly()
+        }
+    }
+
+    private func editTranslations(for track: TrackInfo, lyrics: LyricsDocument) {
+        do {
+            let url = try userStore.ensureTranslationsFile(for: track, lyrics: lyrics)
+            let textEdit = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.TextEdit")
+            if let textEdit {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                NSWorkspace.shared.open([url], withApplicationAt: textEdit, configuration: configuration)
+            } else {
+                NSWorkspace.shared.open(url)
+            }
+            logger.info("Opened translations file for \(track.displayName)")
+        } catch {
+            logger.error("Could not create translations file: \(error.localizedDescription)")
+        }
+    }
+
+    private func revealUserLyricsFolder() {
+        let folders = [userStore.lyricsDirectoryURL, userStore.translationsDirectoryURL]
+        for folder in folders {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        NSWorkspace.shared.activateFileViewerSelecting(folders)
+    }
+
     private func logPlaybackState(_ state: String) {
         guard lastLoggedPlaybackState != state else { return }
         lastLoggedPlaybackState = state
@@ -346,6 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func apply(_ status: AppStatus) {
+        immersive.model.apply(status: status)
         // Skip full menu rebuild when the visible lyric line is unchanged.
         if case .showing(let track, let lyrics, let currentLine) = status {
             if lastTrackKeyForUI == track.identityKey, lastDisplayedLine == currentLine {

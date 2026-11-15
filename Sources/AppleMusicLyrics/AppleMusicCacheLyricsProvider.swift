@@ -319,8 +319,8 @@ final class AppleMusicCacheLyricsProvider: @unchecked Sendable {
                 time: line.time,
                 text: line.text,
                 words: line.words,
-                translation: translations[index],
-                transliteration: transliterations[index]
+                translation: line.translation ?? translations[index],
+                transliteration: line.transliteration ?? transliterations[index]
             )
         }
     }

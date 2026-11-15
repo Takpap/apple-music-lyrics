@@ -47,13 +47,13 @@ enum UpdateServiceError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidCurrentVersion: return "无法读取当前应用版本。"
-        case .invalidResponse: return "更新服务器返回了无效响应。"
-        case .releaseDataInvalid: return "无法解析最新版本信息。"
-        case .downloadUnavailable: return "最新版本没有可用的 macOS 安装镜像。"
-        case .checksumUnavailable: return "无法验证更新文件的完整性。"
-        case .checksumMismatch: return "更新文件校验失败，下载内容可能不完整。"
-        case .unableToSaveDownload: return "无法将更新文件保存到“下载”文件夹。"
+        case .invalidCurrentVersion: return "Couldn’t read the current app version."
+        case .invalidResponse: return "The update server returned an invalid response."
+        case .releaseDataInvalid: return "Couldn’t read the latest release information."
+        case .downloadUnavailable: return "The latest release has no macOS disk image."
+        case .checksumUnavailable: return "Couldn’t verify the update file’s integrity."
+        case .checksumMismatch: return "The update file failed verification; the download may be incomplete."
+        case .unableToSaveDownload: return "Couldn’t save the update file to your Downloads folder."
         }
     }
 }
